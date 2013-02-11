@@ -46,13 +46,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define TIME_SECOND             1000000
 #define PAGE_SIZE               (4*1024)
 
-#undef __NR_perf_counter_open
-#if defined(__x86_64__)
-#define __NR_perf_counter_open  298
-#elif defined(__i386__)
-#define __NR_perf_counter_open  336
-#endif
-
 #define die(msg, args...) \
 do {                         \
             fprintf(stderr,"(%s,%d) " msg "\n", __FUNCTION__ , __LINE__, ##args); \
@@ -70,18 +63,14 @@ typedef struct _event {
    uint64_t config;
    uint64_t exclude_kernel;
    uint64_t exclude_user;
-   uint64_t sampling_period;
 
    const char* name;
    char per_node;
+
+   uint64_t msr_select; /* msr that will be used to monitor the event */
+   uint64_t msr_value; /* msr that will be used to monitor the event */
 } event_t;
 
-
-struct perf_read_ev {
-   uint64_t value;
-   uint64_t time_enabled;
-   uint64_t time_running;
-};
 
 #ifdef __x86_64__
 #define rdtscll(val) {                                           \
@@ -97,43 +86,7 @@ typedef struct pdata {
    int core;
    int nb_events;
    event_t *events;
-   int *fd; /* File descriptor of the perf counter */
    int tid; /* Tid to observe */
 } pdata_t;
-
-// This code is directly imported from <linux_src>/tools/perf/util/parse-events.c
-struct event_symbol {
-   const char  *symbol;                                                                                                                                                                                       
-};
-
-static struct event_symbol event_symbols_sw[PERF_COUNT_SW_MAX] = {
-   [PERF_COUNT_SW_CPU_CLOCK] = {
-      .symbol = "cpu-clock",
-   },
-   [PERF_COUNT_SW_TASK_CLOCK] = {
-      .symbol = "task-clock",
-   },
-   [PERF_COUNT_SW_PAGE_FAULTS] = {
-      .symbol = "page-faults",
-   },
-   [PERF_COUNT_SW_CONTEXT_SWITCHES] = {
-      .symbol = "context-switches",
-   },
-   [PERF_COUNT_SW_CPU_MIGRATIONS] = {
-      .symbol = "cpu-migrations",
-   },
-   [PERF_COUNT_SW_PAGE_FAULTS_MIN] = {
-      .symbol = "minor-faults",
-   },
-   [PERF_COUNT_SW_PAGE_FAULTS_MAJ] = {
-      .symbol = "major-faults",
-   },
-   [PERF_COUNT_SW_ALIGNMENT_FAULTS] = {
-      .symbol = "alignment-faults",
-   },
-   [PERF_COUNT_SW_EMULATION_FAULTS] = {
-      .symbol = "emulation-faults",
-   },                                                                                                                                                            
-};
 
 #endif /* PROFILER_H_ */

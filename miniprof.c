@@ -21,7 +21,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <sched.h>
 #include <linux/unistd.h>
 #include <sys/resource.h>
-
+#include <inttypes.h>
 
 int ncpus;
 int nnodes;
@@ -46,12 +46,14 @@ static int sleep_time = 1 * TIME_SECOND;
 static int nb_events = 0;
 static event_t *events = NULL;
 
-static int nb_observed_pids;
-static int *observed_pids;
-
-static long sys_perf_counter_open(struct perf_event_attr *hw_event, pid_t pid, int cpu, int group_fd, unsigned long flags);
 static uint64_t hex2u64(const char *ptr);
 static void sig_handler(int signal);
+static int wrmsr(int cpu, uint32_t msr, uint64_t val);
+static uint64_t rdmsr(int cpu, uint32_t msr);
+static void stop_all_pmu(void);
+static int has_per_die_msr(void);
+static uint64_t get_msr(int number, int per_die, int select);
+
 
 static int with_fake_threads = 0;
 
@@ -81,27 +83,75 @@ uint64_t get_cpu_freq(void) {
    return freq;
 }
 
-void add_tid(int tid) {
-   observed_pids = realloc(observed_pids, (nb_observed_pids + 1) * sizeof(*observed_pids));
-   observed_pids[nb_observed_pids] = tid;
-   nb_observed_pids++;
+void cpuid(unsigned info, unsigned *eax, unsigned *ebx, unsigned *ecx, unsigned *edx)
+{
+   *eax = info;
+   __asm volatile
+      ("mov %%ebx, %%edi;" /* 32bit PIC: don't clobber ebx */
+       "cpuid;"
+       "mov %%ebx, %%esi;"
+       "mov %%edi, %%ebx;"
+       :"+a" (*eax), "=S" (*ebx), "=c" (*ecx), "=d" (*edx)
+       : :"edi");
 }
 
-int get_tids_of_app(char *app) {
-   int nb_tids_found = 0, pid;
 
-   char buffer[1024];
-   FILE *procs = popen("ps -A -L -o lwp= -o comm=", "r");
-   while (fscanf(procs, "%d %s\n", &pid, buffer) == 2) {
-      if (!strcmp(buffer, app)) {
-         printf("#Matching pid: %d (%s)\n", (int) pid, buffer);
-         nb_tids_found++;
-         add_tid(pid);
-      }
+unsigned int get_processor_family() {
+   char vendor[12];
+   unsigned int family;
+   unsigned int a,b,c,d;
+
+   cpuid(0x0, &a, (unsigned int *)vendor, (unsigned int *)(vendor + 8), (unsigned int *)(vendor + 4));
+   if(memcmp(vendor, "AuthenticAMD", sizeof(vendor)))
+      die("Unsupported CPU (expected AuthenticAMD, found %12.12s)\n", vendor);
+
+   cpuid(0x1, &a, &b, &c, &d);
+   family = (a & 0xffff00);
+
+   return family;
+}
+
+int has_per_die_msr() {
+   unsigned int family = get_processor_family();
+
+   switch(family) {
+      case 0x100f00: /* fam10h*/
+         return 0;
+      case 0x600f00: /* fam15h*/
+         return 1;
+      default:
+         die("Unsupported processor family (%d)\n", family);
    }
-   fclose(procs);
 
-   return nb_tids_found;
+   return 0;
+}
+
+/* Get a MSR register per core or per die. select is used to get the MSR that get programmed or the MSR from which to read the HWC value */
+uint64_t get_msr(int number, int per_die, int select) {
+   unsigned int family = get_processor_family();
+
+   switch(family) {
+      case 0x100f00: /* fam10h*/
+         if(per_die)
+            die("Processor does not have per die MSR\n");
+         if(number >= 4)
+            die("Processor only has 4 MSR per core\n");
+         return 0xC0010000 + number + (select?0:4);
+      case 0x600f00: /* fam15h*/
+         if(per_die) {
+            if(number >= 4)
+               die("Processor only has 4 MSR per die\n");
+            return 0xC0010240 + 2*number + (select?0:1);
+         } else {
+            if(number >= 6)
+               die("Processor only has 6 MSR per core\n");
+            return 0xC0010200 + 2*number + (select?0:1);
+         }
+      default:
+         die("Unsupported processor family (%d)\n", family);
+   }
+
+   return 0;
 }
 
 static pid_t gettid(void) {
@@ -135,9 +185,9 @@ __attribute__((optimize("O0"))) static void* spin_loop(void *pdata) {
 }
 
 static void* thread_loop(void *pdata) {
-   int i, watch_tid;
+   int i;
+   uint64_t event_mask;
    pdata_t *data = (pdata_t*) pdata;
-   watch_tid = (data->tid != 0);
 
    int monitor_node_events = 0;
    for (i = 0; i < nnodes; i++) {
@@ -145,39 +195,28 @@ static void* thread_loop(void *pdata) {
          monitor_node_events = 1;
    }
 
-   if (!watch_tid) {
-      set_affinity(gettid(), data->core);
-   }
-
-   struct perf_event_attr *events_attr = calloc(data->nb_events * sizeof(*events_attr), 1);
-   assert(events_attr != NULL);
-   data->fd = malloc(data->nb_events * sizeof(*data->fd));
-   assert(data->fd);
+   set_affinity(gettid(), data->core);
 
    for (i = 0; i < data->nb_events; i++) {
       if (data->events[i].per_node && !monitor_node_events) {
          // IGNORE THIS EVENT
          continue;
       }
+      event_mask = data->events[i].config;
+      event_mask |= 0x530000;
+      if(data->events[i].exclude_kernel)
+         event_mask &= ~(0x020000ll);
+      if(data->events[i].exclude_user)
+         event_mask &= ~(0x010000ll);
 
-      events_attr[i].size = sizeof(struct perf_event_attr);
-      events_attr[i].type = data->events[i].type;
-      events_attr[i].config = data->events[i].config;
-      events_attr[i].exclude_kernel = data->events[i].exclude_kernel;
-      events_attr[i].exclude_user = data->events[i].exclude_user;
-
-      events_attr[i].read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
-
-      data->fd[i] = sys_perf_counter_open(&events_attr[i], watch_tid ? data->tid : -1, watch_tid ? -1 : data->core, -1, 0);
-      if (data->fd[i] < 0) {
-         thread_die("#[%d] sys_perf_counter_open failed: %s", watch_tid ? data->tid : data->core, strerror(errno));
-      }
+      wrmsr(data->core, data->events[i].msr_value, 0);
+      wrmsr(data->core, data->events[i].msr_select, event_mask);
    }
 
-   struct perf_read_ev *last_counts = calloc(data->nb_events, sizeof(struct perf_read_ev));
+   uint64_t *last_counts = calloc(data->nb_events, sizeof(*last_counts));
    int logical_time = 0;
    while (1) {
-      struct perf_read_ev single_count;
+      uint64_t single_count;
       uint64_t rdtsc;
 
       logical_time++;
@@ -189,15 +228,13 @@ static void* thread_loop(void *pdata) {
             continue;
          }
 
-         assert(read(data->fd[i], &single_count, sizeof(single_count)) == sizeof(single_count));
+         single_count = rdmsr(data->core, data->events[i].msr_value);
 
-         uint64_t value = single_count.value - last_counts[i].value;
-         uint64_t time_running = single_count.time_running - last_counts[i].time_running;
-         uint64_t time_enabled = single_count.time_enabled - last_counts[i].time_enabled;
-         double percent_running = (double) time_running / (double) time_enabled;
+         uint64_t value = single_count - last_counts[i];
+         double percent_running = 1.;
 
 
-         printf("%d\t%d\t%llu\t%llu\t%.3f\t%d\n", i, watch_tid ? data->tid : data->core, (long long unsigned) rdtsc, (long long unsigned) value, percent_running, logical_time);
+         printf("%d\t%d\t%llu\t%llu\t%.3f\t%d\n", i, data->core, (long long unsigned) rdtsc, (long long unsigned) value, percent_running, logical_time);
          last_counts[i] = single_count;
       }
 
@@ -208,38 +245,24 @@ static void* thread_loop(void *pdata) {
 }
 
 void usage (char ** argv) {
-   int i;
-   printf("Usage: %s [-e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_NODE] [-s NAME COUNTER  EXCLUDE_KERNEL EXCLUDE_USER] [-t TID] [-a APP_NAME] [-ft] [-h]\n", argv[0]);
+   printf("Usage: %s [-e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_NODE] [-ft] [-h]\n", argv[0]);
    printf("-e: hardware events\n");
    printf("\tNAME: You can give any name to the counter\n");
    printf("\tCOUNTER: Same format as raw perf events, except that it starts by 0x istead of r\n");
    printf("\tEXCLUDE_KERNEL: Do not include kernel-level samples\n");
    printf("\tEXCLUDE_USER: Do not include user-level samples\n");
    printf("\tPER_NODE: Is this counter an off-core counter (will be monitored on a single core per NUMA node) ?\n\n");
-
-   printf("-s: software events\n");
-   printf("\tCOUNTER: Must be a software event. Supported events are:\n");
-   for (i = 0; i < PERF_COUNT_SW_MAX; i++) {
-      printf("\t\t%s\n", event_symbols_sw[i].symbol); 
-   } 
-   printf("\tEXCLUDE_KERNEL: Do not include kernel-level samples\n");
-   printf("\tEXCLUDE_USER: Do not include user-level samples\n\n");
-
-   printf("-t\n");
-   printf("\tTID: do a per-tid profiling instead of a per-core profiling and consider this TID\n\n");
-   
-   printf("-a\n");
-   printf("\tAPP_NAME: same as -t but with the application name\n");
 }
 
 void parse_options(int argc, char **argv) {
    int i = 1;
+   int nb_evts_per_die = 0;
    for (;;) {
       if (i >= argc)
          break;
       if (!strcmp(argv[i], "-e")) {
          if (i + 5 >= argc)
-            die("Missing argument for -e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_NODE\n");
+            die("Missing argument for -e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_DIE\n");
          events = realloc(events, (nb_events + 1) * sizeof(*events));
          events[nb_events].name = strdup(argv[i + 1]);
          events[nb_events].type = PERF_TYPE_RAW;
@@ -248,51 +271,25 @@ void parse_options(int argc, char **argv) {
          events[nb_events].exclude_user = atoi(argv[i + 4]);
          events[nb_events].exclude_user = atoi(argv[i + 4]);
          events[nb_events].per_node = atoi(argv[i + 5]);
+
+         if(has_per_die_msr()) {
+            if(events[nb_events].per_node) {
+               events[nb_events].msr_select = get_msr(nb_evts_per_die, 1, 1);
+               events[nb_events].msr_value = get_msr(nb_evts_per_die, 1, 0);
+            } else {
+               events[nb_events].msr_select = get_msr(nb_events - nb_evts_per_die, 0, 1);
+               events[nb_events].msr_value = get_msr(nb_events - nb_evts_per_die, 0, 0);
+            }
+         } else {
+            events[nb_events].msr_select = get_msr(nb_events, 0, 1);
+            events[nb_events].msr_value = get_msr(nb_events, 0, 0);
+         }
+
+         if(events[nb_events].per_node)
+            nb_evts_per_die++;
          nb_events++;
 
          i += 6;
-      }
-      else if (!strcmp(argv[i], "-s")) {
-         int j;
-
-         if (i + 3 >= argc)
-            die("Missing argument for -e COUNTER EXCLUDE_KERNEL EXCLUDE_USER\n");
-         events = realloc(events, (nb_events + 1) * sizeof(*events));
-         events[nb_events].name = strdup(argv[i + 1]);
-         events[nb_events].type = PERF_TYPE_SOFTWARE;
-
-         // Looking for the event number
-         for (j = 0; j < PERF_COUNT_SW_MAX; j++) {
-            if(! strcmp(event_symbols_sw[j].symbol, argv[i + 1]))
-               break;
-         } 
-
-         if(j == PERF_COUNT_SW_MAX) {
-            usage(argv);
-            printf("\n%s is not a valid software event\n", argv[i + 1]);
-            exit(1);
-         }
-        
-         events[nb_events].config = j;
-         events[nb_events].exclude_kernel = atoi(argv[i + 2]);
-         events[nb_events].exclude_user = atoi(argv[i + 3]);
-         nb_events++;
-
-         i += 4;
-      }
-
-      else if (!strcmp(argv[i], "-t")) {
-         if (i + 1 >= argc)
-            die("Missing argument for -t TID\n");
-         add_tid(atoi(argv[i + 1]));
-         printf("#Matching pid: %d (user_provided)\n", atoi(argv[i + 1]));
-         i += 2;
-      }
-      else if (!strcmp(argv[i], "-a")) {
-         if (i + 1 >= argc)
-            die("Missing argument for -a APPLICATION\n");
-         get_tids_of_app(argv[i + 1]);
-         i += 2;
       }
       else if (!strcmp(argv[i], "-ft")) {
          with_fake_threads = 1;
@@ -324,6 +321,8 @@ int main(int argc, char**argv) {
       usage(argv);
       die("No events defined");
    }
+
+   if(system("sudo modprobe msr")) {};
 
    /* Fill important informations */
    ncpus = get_nprocs();
@@ -362,19 +361,13 @@ int main(int argc, char**argv) {
             (events[i].exclude_user) ? "yes" : "no", (events[i].per_node) ? "yes" : "no");
    }
 
-   int nb_threads = nb_observed_pids ? nb_observed_pids : ncpus;
-   if (nb_observed_pids)
-      printf("#Event\tTID\tTime\t\t\tSamples\t%% time enabled\tlogical time\n");
-   else
-      printf("#Event\tCore\tTime\t\t\tSamples\t%% time enabled\tlogical time\n");
+   int nb_threads = ncpus;
+   printf("#Event\tCore\tTime\t\t\tSamples\t%% time enabled\tlogical time\n");
 
    pthread_t threads[nb_threads];
    for (i = 0; i < nb_threads; i++) {
       pdata_t *data = calloc(1, sizeof(*data));
-      if (nb_observed_pids > 0)
-         data->tid = observed_pids[i];
-      else
-         data->core = i;
+      data->core = i;
 
       data->nb_events = nb_events;
       data->events = events;
@@ -399,20 +392,10 @@ int main(int argc, char**argv) {
    return 0;
 }
 
-static long sys_perf_counter_open(struct perf_event_attr *hw_event, pid_t pid, int cpu, int group_fd, unsigned long flags) {
-   int ret = syscall(__NR_perf_counter_open, hw_event, pid, cpu, group_fd, flags);
-#  if defined(__x86_64__) || defined(__i386__)
-   if (ret < 0 && ret > -4096) {
-      errno = -ret;
-      ret = -1;
-   }
-#  endif
-   return ret;
-}
-
 static void sig_handler(int signal) {
    printf("#signal caught: %d\n", signal);
    fflush(NULL);
+   stop_all_pmu();
    exit(0);
 }
 
@@ -443,4 +426,59 @@ static uint64_t hex2u64(const char *ptr) {
       p++;
    }
    return long_val;
+}
+
+static int wrmsr(int cpu, uint32_t msr, uint64_t val) {
+   int fd;
+   char msr_file_name[64];
+
+   sprintf(msr_file_name, "/dev/cpu/%d/msr", cpu);
+
+   fd = open(msr_file_name, O_WRONLY);
+   if(fd < 0)
+      thread_die("Cannot open msr device on cpu %d\n", cpu);
+
+   if (pwrite(fd, &val, sizeof(val), msr) != sizeof(val)) {
+      if (errno == EIO) {
+         thread_die("wrmsr: CPU %d cannot set MSR 0x%08"PRIx32" to 0x%016"PRIx64"\n", cpu, msr, val);
+      } else {
+         perror("wrmsr: pwrite");
+         thread_die("Exiting");
+      }
+   }
+   close(fd);
+
+   return 0;
+}
+static uint64_t rdmsr(int cpu, uint32_t msr) {
+   int fd;
+   uint64_t data;
+   char msr_file_name[64];
+
+   sprintf(msr_file_name, "/dev/cpu/%d/msr", cpu);
+
+   fd = open(msr_file_name, O_RDONLY);
+   if(fd < 0)
+      thread_die("Cannot open msr device on cpu %d\n", cpu);
+
+   if (pread(fd, &data, sizeof data, msr) != sizeof data) {
+      if (errno == EIO) {
+         thread_die("rdmsr: CPU %d cannot read MSR 0x%08"PRIx32"\n", cpu, msr);
+      } else {
+         perror("rdmsr: pread");
+         thread_die("Exiting");
+      }
+   }
+   close(fd);
+   return data;
+}
+
+void stop_all_pmu() {
+   int cpu, msr;
+   for(cpu = 0; cpu < ncpus; cpu++) {
+      for(msr = 0; msr < nb_events; msr++) {
+         wrmsr(cpu, events[msr].msr_select, 0);
+         wrmsr(cpu, events[msr].msr_value, 0);
+      }
+   }
 }
