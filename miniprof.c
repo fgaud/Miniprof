@@ -156,7 +156,7 @@ static void* thread_loop(void *pdata) {
    assert(data->fd);
 
    for (i = 0; i < data->nb_events; i++) {
-      if (data->events[i].per_die && !monitor_die_events) {
+      if (data->events[i].per_node && !monitor_die_events) {
          // IGNORE THIS EVENT
          continue;
       }
@@ -185,7 +185,7 @@ static void* thread_loop(void *pdata) {
 
       rdtscll(rdtsc);
       for (i = 0; i < data->nb_events; i++) {
-         if (data->events[i].per_die && !monitor_die_events) {
+         if (data->events[i].per_node && !monitor_die_events) {
             // IGNORE THIS EVENT
             continue;
          }
@@ -208,6 +208,31 @@ static void* thread_loop(void *pdata) {
    return NULL;
 }
 
+void usage (char ** argv) {
+   int i;
+   printf("Usage: %s [-e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_NODE] [-s NAME COUNTER  EXCLUDE_KERNEL EXCLUDE_USER] [-t TID] [-a APP_NAME] [-ft] [-h]\n", argv[0]);
+   printf("-e: hardware events\n");
+   printf("\tNAME: You can give any name to the counter\n");
+   printf("\tCOUNTER: Same format as raw perf events, except that it starts by 0x istead of r\n");
+   printf("\tEXCLUDE_KERNEL: Do not include kernel-level samples\n");
+   printf("\tEXCLUDE_USER: Do not include user-level samples\n");
+   printf("\tPER_NODE: Is this counter an off-core counter (will be monitored on a single core per NUMA node) ?\n\n");
+
+   printf("-s: software events\n");
+   printf("\tCOUNTER: Must be a software event. Supported events are:\n");
+   for (i = 0; i < PERF_COUNT_SW_MAX; i++) {
+      printf("\t\t%s\n", event_symbols_sw[i].symbol); 
+   } 
+   printf("\tEXCLUDE_KERNEL: Do not include kernel-level samples\n");
+   printf("\tEXCLUDE_USER: Do not include user-level samples\n\n");
+
+   printf("-t\n");
+   printf("\tTID: do a per-tid profiling instead of a per-core profiling and consider this TID\n\n");
+   
+   printf("-a\n");
+   printf("\tAPP_NAME: same as -t but with the application name\n");
+}
+
 void parse_options(int argc, char **argv) {
    int i = 1;
    event_t *evts = NULL;
@@ -217,7 +242,7 @@ void parse_options(int argc, char **argv) {
          break;
       if (!strcmp(argv[i], "-e")) {
          if (i + 5 >= argc)
-            die("Missing argument for -e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_DIE\n");
+            die("Missing argument for -e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_NODE\n");
          evts = realloc(evts, (nb_evts + 1) * sizeof(*evts));
          evts[nb_evts].name = strdup(argv[i + 1]);
          evts[nb_evts].type = PERF_TYPE_RAW;
@@ -225,18 +250,40 @@ void parse_options(int argc, char **argv) {
          evts[nb_evts].exclude_kernel = atoi(argv[i + 3]);
          evts[nb_evts].exclude_user = atoi(argv[i + 4]);
          evts[nb_evts].exclude_user = atoi(argv[i + 4]);
-         evts[nb_evts].per_die = atoi(argv[i + 5]);
+         evts[nb_evts].per_node = atoi(argv[i + 5]);
          nb_evts++;
 
          i += 6;
       }
-      else if (!strcmp(argv[i], "-c")) {
-         if (i + 1 >= argc)
-            die("Missing argument for -c NB_CORES\n");
-         ncpus = atoi(argv[i + 1]);
+      if (!strcmp(argv[i], "-s")) {
+         int j;
 
-         i += 2;
+         if (i + 3 >= argc)
+            die("Missing argument for -e COUNTER EXCLUDE_KERNEL EXCLUDE_USER\n");
+         evts = realloc(evts, (nb_evts + 1) * sizeof(*evts));
+         evts[nb_evts].name = strdup(argv[i + 1]);
+         evts[nb_evts].type = PERF_TYPE_SOFTWARE;
+
+         // Looking for the event number
+         for (j = 0; j < PERF_COUNT_SW_MAX; j++) {
+            if(! strcmp(event_symbols_sw[j].symbol, argv[i + 1]))
+               break;
+         } 
+
+         if(j == PERF_COUNT_SW_MAX) {
+            usage(argv);
+            printf("\n%s is not a valid software event\n", argv[i + 1]);
+            exit(1);
+         }
+        
+         evts[nb_evts].config = j;
+         evts[nb_evts].exclude_kernel = atoi(argv[i + 2]);
+         evts[nb_evts].exclude_user = atoi(argv[i + 3]);
+         nb_evts++;
+
+         i += 4;
       }
+
       else if (!strcmp(argv[i], "-t")) {
          if (i + 1 >= argc)
             die("Missing argument for -t TID\n");
@@ -255,7 +302,13 @@ void parse_options(int argc, char **argv) {
          printf("#WARNING: with fake threads\n");
          i++;
       }
+      else if (!strcmp(argv[i], "-h")) {
+         usage(argv);
+         exit(0);
+      }
       else {
+         usage(argv);
+         printf("After usage\n");
          die("Unknown option %s\n", argv[i]);
       }
    }
@@ -267,6 +320,8 @@ void parse_options(int argc, char **argv) {
 }
 
 int main(int argc, char**argv) {
+   int i;
+   
    signal(SIGPIPE, sig_handler);
    signal(SIGTERM, sig_handler);
    signal(SIGINT, sig_handler);
@@ -280,7 +335,6 @@ int main(int argc, char**argv) {
 
    cores_monitoring_die_events = (int*) calloc(ncpus, sizeof(int));
 
-   int i;
    for (i = 0; i < ndies; i++) {
       struct bitmask * bm = numa_allocate_cpumask();
       numa_node_to_cpus(i, bm);
@@ -306,8 +360,8 @@ int main(int argc, char**argv) {
 
    printf("#Clock speed: %llu\n", (long long unsigned) clk_speed);
    for (i = 0; i < nb_events; i++) {
-      printf("#Event %d: %s (%llx) (Exclude Kernel: %s; Exclude User: %s, Per die: %s)\n", i, events[i].name, (long long unsigned) events[i].config, (events[i].exclude_kernel) ? "yes" : "no",
-            (events[i].exclude_user) ? "yes" : "no", (events[i].per_die) ? "yes" : "no");
+      printf("#Event %d: %s (%llx) (Exclude Kernel: %s; Exclude User: %s, Per node: %s)\n", i, events[i].name, (long long unsigned) events[i].config, (events[i].exclude_kernel) ? "yes" : "no",
+            (events[i].exclude_user) ? "yes" : "no", (events[i].per_node) ? "yes" : "no");
    }
 
    int nb_threads = nb_observed_pids ? nb_observed_pids : ncpus;

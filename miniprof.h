@@ -73,7 +73,7 @@ typedef struct _event {
    uint64_t sampling_period;
 
    const char* name;
-   char per_die;
+   char per_node;
 } event_t;
 
 
@@ -100,5 +100,40 @@ typedef struct pdata {
    int *fd; /* File descriptor of the perf counter */
    int tid; /* Tid to observe */
 } pdata_t;
+
+// This code is directly imported from <linux_src>/tools/perf/util/parse-events.c
+struct event_symbol {
+   const char  *symbol;                                                                                                                                                                                       
+};
+
+static struct event_symbol event_symbols_sw[PERF_COUNT_SW_MAX] = {
+   [PERF_COUNT_SW_CPU_CLOCK] = {
+      .symbol = "cpu-clock",
+   },
+   [PERF_COUNT_SW_TASK_CLOCK] = {
+      .symbol = "task-clock",
+   },
+   [PERF_COUNT_SW_PAGE_FAULTS] = {
+      .symbol = "page-faults",
+   },
+   [PERF_COUNT_SW_CONTEXT_SWITCHES] = {
+      .symbol = "context-switches",
+   },
+   [PERF_COUNT_SW_CPU_MIGRATIONS] = {
+      .symbol = "cpu-migrations",
+   },
+   [PERF_COUNT_SW_PAGE_FAULTS_MIN] = {
+      .symbol = "minor-faults",
+   },
+   [PERF_COUNT_SW_PAGE_FAULTS_MAJ] = {
+      .symbol = "major-faults",
+   },
+   [PERF_COUNT_SW_ALIGNMENT_FAULTS] = {
+      .symbol = "alignment-faults",
+   },
+   [PERF_COUNT_SW_EMULATION_FAULTS] = {
+      .symbol = "emulation-faults",
+   },                                                                                                                                                            
+};
 
 #endif /* PROFILER_H_ */
