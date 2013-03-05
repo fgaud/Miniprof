@@ -24,9 +24,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
 int ncpus;
-int ndies;
+int nnodes;
 
-int * cores_monitoring_die_events;
+int * cores_monitoring_node_events;
 
 static int sleep_time = 1 * TIME_SECOND;
 
@@ -140,10 +140,10 @@ static void* thread_loop(void *pdata) {
    pdata_t *data = (pdata_t*) pdata;
    watch_tid = (data->tid != 0);
 
-   int monitor_die_events = 0;
-   for (i = 0; i < ndies; i++) {
-      if (cores_monitoring_die_events[i] == data->core)
-         monitor_die_events = 1;
+   int monitor_node_events = 0;
+   for (i = 0; i < nnodes; i++) {
+      if (cores_monitoring_node_events[i] == data->core)
+         monitor_node_events = 1;
    }
 
    if (!watch_tid) {
@@ -156,7 +156,7 @@ static void* thread_loop(void *pdata) {
    assert(data->fd);
 
    for (i = 0; i < data->nb_events; i++) {
-      if (data->events[i].per_node && !monitor_die_events) {
+      if (data->events[i].per_node && !monitor_node_events) {
          // IGNORE THIS EVENT
          continue;
       }
@@ -185,7 +185,7 @@ static void* thread_loop(void *pdata) {
 
       rdtscll(rdtsc);
       for (i = 0; i < data->nb_events; i++) {
-         if (data->events[i].per_node && !monitor_die_events) {
+         if (data->events[i].per_node && !monitor_node_events) {
             // IGNORE THIS EVENT
             continue;
          }
@@ -328,14 +328,14 @@ int main(int argc, char**argv) {
 
    /* Fill important informations */
    ncpus = get_nprocs();
-   ndies = numa_num_configured_nodes();
+   nnodes = numa_num_configured_nodes();
 
    printf("#NB cpus :\t%d\n", ncpus);
-   printf("#NB dies :\t%d\n", ndies);
+   printf("#NB nodes :\t%d\n", nnodes);
 
-   cores_monitoring_die_events = (int*) calloc(ncpus, sizeof(int));
+   cores_monitoring_node_events = (int*) calloc(ncpus, sizeof(int));
 
-   for (i = 0; i < ndies; i++) {
+   for (i = 0; i < nnodes; i++) {
       struct bitmask * bm = numa_allocate_cpumask();
       numa_node_to_cpus(i, bm);
 
@@ -345,7 +345,7 @@ int main(int argc, char**argv) {
       for (j = 0; j < ncpus; j++) {
          if (numa_bitmask_isbitset(bm, j)) {
             if (!set) {
-               cores_monitoring_die_events[i] = j;
+               cores_monitoring_node_events[i] = j;
                set = 1;
             }
             printf("%d ", j);
