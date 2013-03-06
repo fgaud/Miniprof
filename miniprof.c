@@ -337,7 +337,7 @@ int main(int argc, char**argv) {
    printf("#NB cpus :\t%d\n", ncpus);
    printf("#NB nodes :\t%d\n", nnodes);
 
-   cores_monitoring_node_events = (int*) calloc(ncpus, sizeof(int));
+   cores_monitoring_node_events = (int*) calloc(ndies, sizeof(int));
 
    for (i = 0; i < nnodes; i++) {
       struct bitmask * bm = numa_allocate_cpumask();
