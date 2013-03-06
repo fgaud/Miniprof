@@ -106,7 +106,13 @@ unsigned int get_processor_family() {
       die("Unsupported CPU (expected AuthenticAMD, found %12.12s)\n", vendor);
 
    cpuid(0x1, &a, &b, &c, &d);
-   family = (a & 0xffff00);
+   /* This zeroed:
+      - Reserved bits
+      - ExtModel
+      - BaseModel
+      - Stepping
+   */
+   family = (a & 0x0ff00f00);
 
    return family;
 }
@@ -123,7 +129,7 @@ int has_per_die_msr() {
          die("Unsupported processor family (%d)\n", family);
    }
 
-   return 0;
+   return -1;
 }
 
 /* Get a MSR register per core or per die. select is used to get the MSR that get programmed or the MSR from which to read the HWC value */
@@ -209,8 +215,8 @@ static void* thread_loop(void *pdata) {
       if(data->events[i].exclude_user)
          event_mask &= ~(0x010000ll);
 
-      wrmsr(data->core, data->events[i].msr_value, 0);
       wrmsr(data->core, data->events[i].msr_select, event_mask);
+      wrmsr(data->core, data->events[i].msr_value, 0);
    }
 
    uint64_t *last_counts = calloc(data->nb_events, sizeof(*last_counts));
