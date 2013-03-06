@@ -23,11 +23,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <sys/resource.h>
 #include <inttypes.h>
 
+
 int ncpus;
 int nnodes;
 
 int * cores_monitoring_node_events;
-
 static int sleep_time = 1 * TIME_SECOND;
 
 /*
@@ -51,8 +51,8 @@ static void sig_handler(int signal);
 static int wrmsr(int cpu, uint32_t msr, uint64_t val);
 static uint64_t rdmsr(int cpu, uint32_t msr);
 static void stop_all_pmu(void);
-static int has_per_die_msr(void);
-static uint64_t get_msr(int number, int per_die, int select);
+static int has_per_node_msr(void);
+static uint64_t get_msr(int number, int per_node, int select);
 
 
 static int with_fake_threads = 0;
@@ -117,7 +117,7 @@ unsigned int get_processor_family() {
    return family;
 }
 
-int has_per_die_msr() {
+int has_per_node_msr() {
    unsigned int family = get_processor_family();
 
    switch(family) {
@@ -133,20 +133,20 @@ int has_per_die_msr() {
 }
 
 /* Get a MSR register per core or per die. select is used to get the MSR that get programmed or the MSR from which to read the HWC value */
-uint64_t get_msr(int number, int per_die, int select) {
+uint64_t get_msr(int number, int per_node, int select) {
    unsigned int family = get_processor_family();
 
    switch(family) {
       case 0x100f00: /* fam10h*/
-         if(per_die)
+         if(per_node)
             die("Processor does not have per die MSR\n");
          if(number >= 4)
             die("Processor only has 4 MSR per core\n");
          return 0xC0010000 + number + (select?0:4);
       case 0x600f00: /* fam15h*/
-         if(per_die) {
+         if(per_node) {
             if(number >= 4)
-               die("Processor only has 4 MSR per die\n");
+               die("Processor only has 4 MSR per node\n");
             return 0xC0010240 + 2*number + (select?0:1);
          } else {
             if(number >= 6)
@@ -258,11 +258,13 @@ void usage (char ** argv) {
    printf("\tEXCLUDE_KERNEL: Do not include kernel-level samples\n");
    printf("\tEXCLUDE_USER: Do not include user-level samples\n");
    printf("\tPER_NODE: Is this counter an off-core counter (will be monitored on a single core per NUMA node) ?\n\n");
+
+   printf("-ft: fake threads (put threads that spinloop with low priority on all cores)\n\n");
 }
 
 void parse_options(int argc, char **argv) {
    int i = 1;
-   int nb_evts_per_die = 0;
+   int nb_events_per_node = 0;
    for (;;) {
       if (i >= argc)
          break;
@@ -278,13 +280,13 @@ void parse_options(int argc, char **argv) {
          events[nb_events].exclude_user = atoi(argv[i + 4]);
          events[nb_events].per_node = atoi(argv[i + 5]);
 
-         if(has_per_die_msr()) {
+         if(has_per_node_msr()) {
             if(events[nb_events].per_node) {
-               events[nb_events].msr_select = get_msr(nb_evts_per_die, 1, 1);
-               events[nb_events].msr_value = get_msr(nb_evts_per_die, 1, 0);
+               events[nb_events].msr_select = get_msr(nb_events_per_node, 1, 1);
+               events[nb_events].msr_value = get_msr(nb_events_per_node, 1, 0);
             } else {
-               events[nb_events].msr_select = get_msr(nb_events - nb_evts_per_die, 0, 1);
-               events[nb_events].msr_value = get_msr(nb_events - nb_evts_per_die, 0, 0);
+               events[nb_events].msr_select = get_msr(nb_events - nb_events_per_node, 0, 1);
+               events[nb_events].msr_value = get_msr(nb_events - nb_events_per_node, 0, 0);
             }
          } else {
             events[nb_events].msr_select = get_msr(nb_events, 0, 1);
@@ -292,7 +294,7 @@ void parse_options(int argc, char **argv) {
          }
 
          if(events[nb_events].per_node)
-            nb_evts_per_die++;
+            nb_events_per_node++;
          nb_events++;
 
          i += 6;
