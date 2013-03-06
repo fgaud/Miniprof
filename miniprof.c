@@ -43,10 +43,9 @@ static int sleep_time = 1 * TIME_SECOND;
  *
  * - PERF_TYPE_HARDWARE: predefined values of HW counters in Linux (eg PERF_COUNT_HW_CPU_CYCLES = CPU_CLK_UNHALTED).
  */
-static event_t default_events[] = { { .name = "CLK_UNHALTED", .type = PERF_TYPE_HARDWARE, .config = PERF_COUNT_HW_CPU_CYCLES, }, };
+static int nb_events = 0;
+static event_t *events = NULL;
 
-static int nb_events = sizeof(default_events) / sizeof(*default_events);
-static event_t *events = default_events;
 static int nb_observed_pids;
 static int *observed_pids;
 
@@ -235,34 +234,32 @@ void usage (char ** argv) {
 
 void parse_options(int argc, char **argv) {
    int i = 1;
-   event_t *evts = NULL;
-   int nb_evts = 0;
    for (;;) {
       if (i >= argc)
          break;
       if (!strcmp(argv[i], "-e")) {
          if (i + 5 >= argc)
             die("Missing argument for -e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_NODE\n");
-         evts = realloc(evts, (nb_evts + 1) * sizeof(*evts));
-         evts[nb_evts].name = strdup(argv[i + 1]);
-         evts[nb_evts].type = PERF_TYPE_RAW;
-         evts[nb_evts].config = hex2u64(argv[i + 2]);
-         evts[nb_evts].exclude_kernel = atoi(argv[i + 3]);
-         evts[nb_evts].exclude_user = atoi(argv[i + 4]);
-         evts[nb_evts].exclude_user = atoi(argv[i + 4]);
-         evts[nb_evts].per_node = atoi(argv[i + 5]);
-         nb_evts++;
+         events = realloc(events, (nb_events + 1) * sizeof(*events));
+         events[nb_events].name = strdup(argv[i + 1]);
+         events[nb_events].type = PERF_TYPE_RAW;
+         events[nb_events].config = hex2u64(argv[i + 2]);
+         events[nb_events].exclude_kernel = atoi(argv[i + 3]);
+         events[nb_events].exclude_user = atoi(argv[i + 4]);
+         events[nb_events].exclude_user = atoi(argv[i + 4]);
+         events[nb_events].per_node = atoi(argv[i + 5]);
+         nb_events++;
 
          i += 6;
       }
-      if (!strcmp(argv[i], "-s")) {
+      else if (!strcmp(argv[i], "-s")) {
          int j;
 
          if (i + 3 >= argc)
             die("Missing argument for -e COUNTER EXCLUDE_KERNEL EXCLUDE_USER\n");
-         evts = realloc(evts, (nb_evts + 1) * sizeof(*evts));
-         evts[nb_evts].name = strdup(argv[i + 1]);
-         evts[nb_evts].type = PERF_TYPE_SOFTWARE;
+         events = realloc(events, (nb_events + 1) * sizeof(*events));
+         events[nb_events].name = strdup(argv[i + 1]);
+         events[nb_events].type = PERF_TYPE_SOFTWARE;
 
          // Looking for the event number
          for (j = 0; j < PERF_COUNT_SW_MAX; j++) {
@@ -276,10 +273,10 @@ void parse_options(int argc, char **argv) {
             exit(1);
          }
         
-         evts[nb_evts].config = j;
-         evts[nb_evts].exclude_kernel = atoi(argv[i + 2]);
-         evts[nb_evts].exclude_user = atoi(argv[i + 3]);
-         nb_evts++;
+         events[nb_events].config = j;
+         events[nb_events].exclude_kernel = atoi(argv[i + 2]);
+         events[nb_events].exclude_user = atoi(argv[i + 3]);
+         nb_events++;
 
          i += 4;
       }
@@ -312,11 +309,6 @@ void parse_options(int argc, char **argv) {
          die("Unknown option %s\n", argv[i]);
       }
    }
-
-   if (nb_evts != 0) {
-      nb_events = nb_evts;
-      events = evts;
-   }
 }
 
 int main(int argc, char**argv) {
@@ -325,6 +317,13 @@ int main(int argc, char**argv) {
    signal(SIGPIPE, sig_handler);
    signal(SIGTERM, sig_handler);
    signal(SIGINT, sig_handler);
+
+   // Parse options
+   parse_options(argc, argv);
+   if(!nb_events) {
+      usage(argv);
+      die("No events defined");
+   }
 
    /* Fill important informations */
    ncpus = get_nprocs();
@@ -355,7 +354,6 @@ int main(int argc, char**argv) {
       numa_free_cpumask(bm);
    }
 
-   parse_options(argc, argv);
    uint64_t clk_speed = get_cpu_freq();
 
    printf("#Clock speed: %llu\n", (long long unsigned) clk_speed);
