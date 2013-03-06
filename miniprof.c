@@ -106,7 +106,7 @@ unsigned int get_processor_family() {
       die("Unsupported CPU (expected AuthenticAMD, found %12.12s)\n", vendor);
 
    cpuid(0x1, &a, &b, &c, &d);
-   /* This zeroed:
+   /* This zeroes:
       - Reserved bits
       - ExtModel
       - BaseModel
