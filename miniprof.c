@@ -148,8 +148,8 @@ uint64_t get_msr(int number, int per_node, int select) {
                die("Processor only has 4 MSR per node\n");
             return 0xC0010240 + 2*number + (select?0:1);
          } else {
-            if(number >= 6)
-               die("Processor only has 6 MSR per core\n");
+            if(number >= 3)
+               die("Processor only has 3 MSR per core\n");
             return 0xC0010200 + 2*number + (select?0:1);
          }
       default:
