@@ -23,26 +23,25 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <sys/resource.h>
 #include <inttypes.h>
 
+/*
+ * Warning:
+ * Some portions of this code are specific to AMD 10h and 15h architectures.
+ */
 
 int ncpus;
 int nnodes;
 
+/* points to an array indicating which core is in charge
+   of monitoring the per-node events of a given node */
 int * cores_monitoring_node_events;
+
+/* 
+ * sampling period
+ * (time interval between two dumps of the performance counters)
+ */
 static int sleep_time = 1 * TIME_SECOND;
 
-/*
- * Events :
- * - PERF_TYPE_RAW: raw counters. The value must be 0xz0040yyzz.
- *      For 'z-zz' values, see AMD reference manual (eg. 076h = CPU_CLK_UNHALTED).
- *      'yy' is the Unitmask.
- *      The '4' is 0100b = event is enabled (can also be enable/disabled via ioctl).
- *      The '0' before yy indicate which level to monitor (User or OS).
- *              It is modified by the event_attr when .exclude_[user/kernel] == 0.
- *              When it is the case the bits 16 or 17 of .config are set to 1 (== monitor user/kernel).
- *              If this is set to anything else than '0', it can be confusing since the kernel does not modify it when .exclude_xxx is set.
- *
- * - PERF_TYPE_HARDWARE: predefined values of HW counters in Linux (eg PERF_COUNT_HW_CPU_CYCLES = CPU_CLK_UNHALTED).
- */
+
 static int nb_events = 0;
 static event_t *events = NULL;
 
@@ -121,9 +120,9 @@ int has_per_node_msr() {
    unsigned int family = get_processor_family();
 
    switch(family) {
-      case 0x100f00: /* fam10h*/
+      case 0x100f00: /* AMD fam10h */
          return 0;
-      case 0x600f00: /* fam15h*/
+      case 0x600f00: /* AMD fam15h */
          return 1;
       default:
          die("Unsupported processor family (%d)\n", family);
@@ -132,18 +131,45 @@ int has_per_node_msr() {
    return -1;
 }
 
-/* Get a MSR register per core or per die. select is used to get the MSR that get programmed or the MSR from which to read the HWC value */
+/*
+ * Returns a MSR id for a performance monitoring counter.
+ *
+ * Input parameters:
+ *    - number : Logical number of the counter (starting from 0).
+ *               This is used ot make sure that a given MSR has not been 
+ *               already reserved and that there are enough remaining
+ *               available counters.
+ *               Note that this version of minipof does NOT multiplex counters.
+ *
+ *    - per_die : Boolean indicating which kind of counter is requested.
+ *                true => Northbridge (i.e., per-node) performance event
+ *                false => (per-core) performance event
+ *
+ *    - select : Boolean indicating which kind of MSR is requested.
+ *               true => Performance event select
+ *                       (i.e., PERF_CTL/NB_PERF_CTL in AMD terminology)
+ *               false => Performance event counter
+ *                       (i.e., PERF_CTR/NB_PERF_CTR in AMD terminology)
+ */
 uint64_t get_msr(int number, int per_node, int select) {
    unsigned int family = get_processor_family();
 
    switch(family) {
-      case 0x100f00: /* fam10h*/
+      case 0x100f00: /* AMD fam10h */
+         /* 
+          * For details on the MSR values,
+          * see AMD BKDG 10h, section 2.16.1
+          */           
          if(per_node)
             die("Processor does not have per die MSR\n");
          if(number >= 4)
             die("Processor only has 4 MSR per core\n");
          return 0xC0010000 + number + (select?0:4);
-      case 0x600f00: /* fam15h*/
+      case 0x600f00: /* AMD fam15h */
+         /* 
+          * For details on the MSR values,
+          * see AMD BKDG 15h, sections 2.7.1 and 2.7.2
+          */      
          if(per_node) {
             if(number >= 4)
                die("Processor only has 4 MSR per node\n");
@@ -176,7 +202,15 @@ void set_affinity(int tid, int core_id) {
    }
 }
 
-/** Run a low priority thread on each profiled core **/
+/* 
+ * Routine executed by the low priority threads created
+ * by the "fake thread" option.
+ * This is used to make sure that a core is never halted,
+ * in order to avoid bugs/inconsistencies with the performance counters.
+ *
+ * Note that these threads introduce some "noise" when the cores are not idle,
+ * since they consume a fraction of the CPU time (despite their low priority).
+ */
 __attribute__((optimize("O0"))) static void* spin_loop(void *pdata) {
    pdata_t *data = (pdata_t*) pdata;
 
@@ -190,10 +224,40 @@ __attribute__((optimize("O0"))) static void* spin_loop(void *pdata) {
    return NULL;
 }
 
+/*
+ * Routine executed by the miniprof threads in order to periodically dump
+ * the state of the performance counters.
+ *
+ * Note that the same per-core (resp. per-node) counters are monitored on
+ * all cores (resp. nodes).
+ *
+ * Warning: AMD-specific code 
+ */
+
 static void* thread_loop(void *pdata) {
    int i;
    uint64_t event_mask;
    pdata_t *data = (pdata_t*) pdata;
+
+/*
+ *  *** Details on the event mask (event_mask |= 0x530000;) ***
+ *    This part is common for AMD 10h and 15h architectures
+ *        (see description of "PERF_CTL" MSR in BKDG 10h/15h).
+ *
+ *    Bit number in the chosen PERF_CTL register :
+ *                      22  21  20  19  18  17  16
+ *    0x530000  ---->    1   0   1   0   0   1   1
+ *
+ *    Bit 16: Count events occurring in user mode (CPL > 0)
+ *    Bit 17: Count events occurring in kernel mode (CPL = 0)
+ *    Bit 18: Level detect
+ *    Bit 19: Reserved bit
+ *    Bit 20: enable the APIC to generate an interrupt when a counter overflows
+ *            WARNING : for unknown reasons, this bit MUST be set to 1
+ *                      (otherwise, the counters do not work correctly)
+ *    Bit 21: Reserved bit
+ *    Bit 22: Enable performance counter
+ */
 
    int monitor_node_events = 0;
    for (i = 0; i < nnodes; i++) {
@@ -205,14 +269,16 @@ static void* thread_loop(void *pdata) {
 
    for (i = 0; i < data->nb_events; i++) {
       if (data->events[i].per_node && !monitor_node_events) {
-         // IGNORE THIS EVENT
+         /* ignore this event */
          continue;
       }
       event_mask = data->events[i].config;
-      event_mask |= 0x530000;
+      event_mask |= 0x530000; /* see details above */
       if(data->events[i].exclude_kernel)
+         /* unset bit 17 of the chosen PERF_CTL register */
          event_mask &= ~(0x020000ll);
       if(data->events[i].exclude_user)
+         /* unset bit 16 of the chosen PERF_CTL register */
          event_mask &= ~(0x010000ll);
 
       wrmsr(data->core, data->events[i].msr_select, event_mask);
@@ -225,12 +291,13 @@ static void* thread_loop(void *pdata) {
       uint64_t single_count;
       uint64_t rdtsc;
 
+      /* logical time is incremented after each sleeping phase */
       logical_time++;
 
       rdtscll(rdtsc);
       for (i = 0; i < data->nb_events; i++) {
          if (data->events[i].per_node && !monitor_node_events) {
-            // IGNORE THIS EVENT
+            /* ignore this event */
             continue;
          }
 
@@ -239,6 +306,32 @@ static void* thread_loop(void *pdata) {
          uint64_t value = single_count - last_counts[i];
          double percent_running = 1.;
 
+        /*
+         * Trace format:
+         *    - event number (starting from 0):
+         *         corresponds to the order in which the events were
+         *         passed on the command line
+         *    - core id
+         *    - timestamp (from local clock cycle counter)
+         *    - counter increase:
+         *          WARNING: the printed value is not exactly the value found
+         *                   in the PERF_CTR MSR. Instead, it is the difference
+         *                   with between the latest counter value and
+         *                   the one from the previous iteration (i.e., the
+         *                   number of samples found in the last time interval)
+         *    - percent running: time ratio for the monitoring (if the counter
+         *                   is multiplexed). This is not really useful in this
+         *                   version of miniprof (no multiplexing).
+         *                   However, this field should be kept because
+         *                   there is another version of miniprof
+         *                   (based on Perf) which uses this field (in order to
+         *                   scale the valued of the multiplexed counters).
+         *                   Removing this field in this version of miniprof
+         *                   would break compatibility with various
+         *                   post-processing scripts that currently work with
+         *                   all versions of miniprof.
+         *    - logical time
+         */
 
          printf("%d\t%d\t%llu\t%llu\t%.3f\t%d\n", i, data->core, (long long unsigned) rdtsc, (long long unsigned) value, percent_running, logical_time);
          last_counts[i] = single_count;
@@ -270,7 +363,18 @@ void parse_options(int argc, char **argv) {
          break;
       if (!strcmp(argv[i], "-e")) {
          if (i + 5 >= argc)
-            die("Missing argument for -e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_DIE\n");
+            die("Missing argument for -e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_NODE\n");
+         /*   
+          * Arguments for -e:
+          *   NAME: event name (that you want to print on the output trace)
+          *   COUNTER: (in hex format) specifies the event that you want
+          *            to monitor (and the unitmask). Use the numerical value
+          *            provided in your processor documentation.
+          *            See also miniprof.h for further details.
+          *   EXCLUDE_KERNEL: 0 to monitor kernel-level events, 1 otherwise
+          *   EXCLUDE_USER: 0 to monitor user-level events, 1 otherwise
+          *   PER_NODE: 1 for a per-die event, 0 otherwise 
+          */             
          events = realloc(events, (nb_events + 1) * sizeof(*events));
          events[nb_events].name = strdup(argv[i + 1]);
          events[nb_events].type = PERF_TYPE_RAW;
@@ -301,6 +405,7 @@ void parse_options(int argc, char **argv) {
       }
       else if (!strcmp(argv[i], "-ft")) {
          with_fake_threads = 1;
+         /* see spin_loop for details */
          printf("#WARNING: with fake threads\n");
          i++;
       }
@@ -316,6 +421,10 @@ void parse_options(int argc, char **argv) {
    }
 }
 
+/*
+ * When there are no errors, miniprof executes an infinite loop.
+ * Send a SIGTERM or SIGINT signal to terminate it.
+ */
 int main(int argc, char**argv) {
    int i;
    
@@ -330,17 +439,19 @@ int main(int argc, char**argv) {
       die("No events defined");
    }
 
+   /* Load the kernel module for MSR access */
    if(system("sudo modprobe msr")) {};
 
    /* Fill important informations */
-   ncpus = get_nprocs();
-   nnodes = numa_num_configured_nodes();
+   ncpus = get_nprocs(); /* Number of cores on the machine */
+   nnodes = numa_num_configured_nodes(); /* Number of nodes on the machine */
 
    printf("#NB cpus :\t%d\n", ncpus);
    printf("#NB nodes :\t%d\n", nnodes);
 
    cores_monitoring_node_events = (int*) calloc(nnodes, sizeof(int));
 
+   /* For each node, print which cores belong to it */
    for (i = 0; i < nnodes; i++) {
       struct bitmask * bm = numa_allocate_cpumask();
       numa_node_to_cpus(i, bm);
@@ -363,7 +474,9 @@ int main(int argc, char**argv) {
 
    uint64_t clk_speed = get_cpu_freq();
 
+   /* Print CPU clock speed */
    printf("#Clock speed: %llu\n", (long long unsigned) clk_speed);
+   /* Print list of monitored events */
    for (i = 0; i < nb_events; i++) {
       printf("#Event %d: %s (%llx) (Exclude Kernel: %s; Exclude User: %s, Per node: %s)\n", i, events[i].name, (long long unsigned) events[i].config, (events[i].exclude_kernel) ? "yes" : "no",
             (events[i].exclude_user) ? "yes" : "no", (events[i].per_node) ? "yes" : "no");
@@ -373,6 +486,10 @@ int main(int argc, char**argv) {
    printf("#Event\tCore\tTime\t\t\tSamples\t%% time enabled\tlogical time\n");
 
    pthread_t threads[nb_threads];
+   /* 
+    * Spawn 1 monitoring thread on each monitored core
+    * (plus 1 spinlooping thread per core if the -ft option is enabled)
+    */   
    for (i = 0; i < nb_threads; i++) {
       pdata_t *data = calloc(1, sizeof(*data));
       data->core = i;
@@ -395,6 +512,8 @@ int main(int argc, char**argv) {
    for (i = 0; i < nb_threads - 1; i++) {
       pthread_join(threads[i], NULL);
    }
+
+   /* This place is never reached when there are no errors */
 
    printf("#END??\n");
    return 0;
@@ -436,6 +555,10 @@ static uint64_t hex2u64(const char *ptr) {
    return long_val;
 }
 
+/* 
+ * Performs a write access to a given MSR.
+ * Assumes that the (x86) msr kernel module is loaded.
+ */
 static int wrmsr(int cpu, uint32_t msr, uint64_t val) {
    int fd;
    char msr_file_name[64];
@@ -458,6 +581,11 @@ static int wrmsr(int cpu, uint32_t msr, uint64_t val) {
 
    return 0;
 }
+
+/* 
+ * Performs a read access to a given MSR.
+ * Assumes that the (x86) msr kernel module is loaded.
+ */
 static uint64_t rdmsr(int cpu, uint32_t msr) {
    int fd;
    uint64_t data;
