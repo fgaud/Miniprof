@@ -1,0 +1,101 @@
+Miniprof - lightweight profiler
+ 
+
+Warning: The msr branch of miniprof currently only works on AMD 10h and 15h architectures.
+
+
+*** Usage ***
+./miniprof -e EVENT_NAME COUNTER_VALUE EXCLUDE_KERNEL_SAMPLES EXCLUDE_USER_SAMPLES PER_NODE_EVENT
+
+   - EVENT_NAME                     string that you may use to remember 
+                                    what you measured, e.g., "CLK_UNHALTED"
+   - COUNTER_VALUE                  the raw value of what you want to measure, 
+                                    e.g., 0x76 for clk unhalted event. 
+                                    See BKDG §Performance counters to get the 
+                                    full list of events.
+   - EXCLUDE_[KERNEL/USER]_SAMPLES  when set to 1, miniprof does not count event 
+                                    when in kernel/usermode. When both are set to 1,
+                                    miniprof measures nothing (pretty useless).
+   - PER_NODE_EVENT                 all Northbridge events are per node (L3, DRAM, 
+                                    Hypertransport, ...). In the 15h BKDG this is explicit
+                                    (events are described in the "NB Performance event"). 
+                                    For 10h, its not.
+
+
+Format of the COUNTER_VALUE field: 0xz0000yyzz
+   It corresponds exactly to what is put is performance monitoring MSRs (for details, see PERF_CTL description in AMD BKDG).
+      
+  'z-zz' values: EventSelect 
+  'yy': UnitMask
+
+  Examples for AMD 15h architectures (BKDG 15h section 3.15):
+     1) CPU clocks not halted (per-core event):
+             z-zz: 0x076
+             yy: 0x00 (no unitmask)
+             => use -e CLK_UNHALTED 0x76 0 0 0
+     2) L2 cache misses (per core event) with unitmask selecting
+          "DC fill" + "TLB page table walk":
+             z-zz: 0x07E
+             yy: 0x03
+             => use -e L2M 0x37E 0 0 0
+     3) Tagged IBS Ops (per core event) with unitmask selecting
+           "Number of ops tagged by IBS that retired"
+             z-zz: 0x1CF
+             yy: 0x01
+             => use -e IBSOPS 0x10000017E 0 0 0
+     4) DRAM accesses (per-node event) with unitmask selecting
+          "DCT1 Page hit":
+             z-zz: 0x0E0
+             yy: 0x08
+             => use -e DRAM_ACCESSES 0x8E0 0 0 1
+
+
+Miniprof will set the other bits of the counter automatically (and will override your settings).
+More precisely, miniprof takes "COUNTER_VALUE | 0x530000" and puts it in the MSR directly.
+
+    Bit number in the chosen PERF_CTL register :
+                      22  21  20  19  18  17  16
+    0x530000  ---->    1   0   1   0   0   1   1
+
+    Bit 16: Count events occurring in user mode (CPL > 0)
+    Bit 17: Count events occurring in kernel mode (CPL = 0)
+    Bit 18: Level detect
+    Bit 19: Reserved bit
+    Bit 20: enable the APIC to generate an interrupt when a counter overflows
+            WARNING : for unknown reasons, this bit MUST be set to 1
+                      (otherwise, the counters do not work correctly)
+    Bit 21: Reserved bit
+    Bit 22: Enable performance counter
+
+
+
+
+*** Output format ***
+Trace format:
+
+Each dumped line contains the following data, separated by a tab:
+    - event number (starting from 0):
+         corresponds to the order in which the events were
+         passed on the command line
+    - core id
+    - timestamp (from local clock cycle counter)
+    - counter increase:
+          WARNING: the printed value is not exactly the value found
+                   in the PERF_CTR MSR. Instead, it is the difference
+                   with between the latest counter value and
+                   the one from the previous iteration (i.e., the
+                   number of samples found in the last time interval)
+    - percent running: time ratio for the monitoring (if the counter
+                   is multiplexed). This is not really useful in this
+                   version of miniprof (no multiplexing).
+                   However, this field should be kept because
+                   there is another version of miniprof
+                   (based on Perf) which uses this field (in order to
+                   scale the valued of the multiplexed counters).
+                   Removing this field in this version of miniprof
+                   would break compatibility with various
+                   post-processing scripts that currently work with
+                   all versions of miniprof.
+    - logical time
+
+
