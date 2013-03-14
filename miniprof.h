@@ -101,7 +101,7 @@ typedef struct _event {
  *           "Number of ops tagged by IBS that retired"
  *             z-zz: 0x1CF
  *             yy: 0x01
- *     4) DRAM accesses (per-die event) with unitmask selecting
+ *     4) DRAM accesses (per-node event) with unitmask selecting
  *          "DCT1 Page hit":
  *             z-zz: 0x0E0
  *             yy: 0x08
