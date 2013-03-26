@@ -519,8 +519,10 @@ void stop_all_pmu() {
    int cpu, msr;
    for(cpu = 0; cpu < ncpus; cpu++) {
       for(msr = 0; msr < nb_events; msr++) {
+         // Stop counting event
          wrmsr(cpu, events[msr].msr_select, 0);
-         wrmsr(cpu, events[msr].msr_value, 0);
+         // Do NOT reset value msr to avoid reading something inconsistent
+         //wrmsr(cpu, events[msr].msr_value, 0); 
       }
    }
 }
