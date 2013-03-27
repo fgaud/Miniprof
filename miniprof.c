@@ -52,6 +52,7 @@ static int *observed_pids;
 static long sys_perf_counter_open(struct perf_event_attr *hw_event, pid_t pid, int cpu, int group_fd, unsigned long flags);
 static uint64_t hex2u64(const char *ptr);
 static void sig_handler(int signal);
+static void disable_nmi_watchdog(void);
 
 static int with_fake_threads = 0;
 
@@ -317,6 +318,7 @@ int main(int argc, char**argv) {
    signal(SIGPIPE, sig_handler);
    signal(SIGTERM, sig_handler);
    signal(SIGINT, sig_handler);
+   disable_nmi_watchdog();
 
    // Parse options
    parse_options(argc, argv);
@@ -443,4 +445,8 @@ static uint64_t hex2u64(const char *ptr) {
       p++;
    }
    return long_val;
+}
+
+static void disable_nmi_watchdog() {
+   if(system("echo 0 > /proc/sys/kernel/nmi_watchdog")) { /* nothing, error already printed by system() */ };
 }
