@@ -42,8 +42,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <sys/ioctl.h>
 #include <sys/time.h>
 #include <dirent.h>
+#include <numa.h>
+#include <sched.h>
+#include <linux/unistd.h>
+#include <sys/resource.h>
+#include <inttypes.h>
 
 #define TIME_SECOND             1000000
+#define TIME_MSECOND            1000
 #define PAGE_SIZE               (4*1024)
 
 #define die(msg, args...) \
@@ -93,5 +99,15 @@ typedef struct pdata {
    event_t *events;
    int tid; /* Tid to observe (useless in msr branch) */
 } pdata_t;
+
+struct msr {
+   int id;
+   uint64_t select;
+   uint64_t value;
+   int used;
+   int (*can_be_used)(struct msr*, uint64_t);
+};
+
+struct msr* get_msr(uint64_t evt);
 
 #endif /* PROFILER_H_ */

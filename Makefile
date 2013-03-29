@@ -1,6 +1,6 @@
 CFLAGS   = -Wall -O2 -g -Werror
 LDLIBS   = -lpthread -lnuma
-FILES    = miniprof.c miniprof.h
+FILES    = miniprof.c machine.c miniprof.h
 
 all: miniprof
 

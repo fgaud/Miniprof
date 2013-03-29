@@ -16,12 +16,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "miniprof.h"
-#include <numa.h>
-
-#include <sched.h>
-#include <linux/unistd.h>
-#include <sys/resource.h>
-#include <inttypes.h>
 
 int ncpus;
 int nnodes;
@@ -31,7 +25,7 @@ int nnodes;
 int * cores_monitoring_node_events;
 
 /* sampling period (time interval between two dumps of the performance counters) */
-static int sleep_time = 1 * TIME_SECOND;
+static int sleep_time = 100 * TIME_MSECOND;
 
 
 static int nb_events = 0;
@@ -42,8 +36,6 @@ static void sig_handler(int signal);
 static int wrmsr(int cpu, uint32_t msr, uint64_t val);
 static uint64_t rdmsr(int cpu, uint32_t msr);
 static void stop_all_pmu(void);
-static int has_per_node_msr(void);
-static uint64_t get_msr(int number, int per_node, int select);
 
 
 static int with_fake_threads = 0;
@@ -72,91 +64,6 @@ uint64_t get_cpu_freq(void) {
 
    fclose(fd);
    return freq;
-}
-
-void cpuid(unsigned info, unsigned *eax, unsigned *ebx, unsigned *ecx, unsigned *edx)
-{
-   *eax = info;
-   __asm volatile
-      ("mov %%ebx, %%edi;" /* 32bit PIC: don't clobber ebx */
-       "cpuid;"
-       "mov %%ebx, %%esi;"
-       "mov %%edi, %%ebx;"
-       :"+a" (*eax), "=S" (*ebx), "=c" (*ecx), "=d" (*edx)
-       : :"edi");
-}
-
-
-unsigned int get_processor_family() {
-   char vendor[12];
-   unsigned int family;
-   unsigned int a,b,c,d;
-
-   cpuid(0x0, &a, (unsigned int *)vendor, (unsigned int *)(vendor + 8), (unsigned int *)(vendor + 4));
-   if(memcmp(vendor, "AuthenticAMD", sizeof(vendor)))
-      die("Unsupported CPU (expected AuthenticAMD, found %12.12s)\n", vendor);
-
-   cpuid(0x1, &a, &b, &c, &d);
-   /* This zeroes:
-      - Reserved bits
-      - ExtModel
-      - BaseModel
-      - Stepping
-   */
-   family = (a & 0x0ff00f00);
-
-   return family;
-}
-
-int has_per_node_msr() {
-   unsigned int family = get_processor_family();
-
-   switch(family) {
-      case 0x100f00: /* AMD fam10h */
-         return 0;
-      case 0x600f00: /* AMD fam15h */
-         return 1;
-      default:
-         die("Unsupported processor family (%d)\n", family);
-   }
-
-   return -1;
-}
-
-/*
- * Returns a MSR id for a performance monitoring counter.
- * @number : Logical number of the counter
- * @per_node : Boolean indicating which kind of counter is requested.
- *            1 => Northbridge performance event (L3, DRAM, etc.)
- *            0 => Per-core performance event (L1, L2, cycles, etc.)
- * @select :  1 => msr that gets configured (i.e., PERF_CTL/NB_PERF_CTL in AMD terminology)
- *            0 => msr that contains the number of samples (i.e., PERF_CTR/NB_PERF_CTR in AMD terminology)
- */
-uint64_t get_msr(int number, int per_node, int select) {
-   unsigned int family = get_processor_family();
-
-   switch(family) {
-      case 0x100f00: /* AMD fam10h, see AMD BKDG 10h, section 2.16.1 */
-         if(per_node)
-            die("Processor does not have per die MSR\n");
-         if(number >= 4)
-            die("Processor only has 4 MSR per core\n");
-         return 0xC0010000 + number + (select?0:4);
-      case 0x600f00: /* AMD fam15h, see AMD BKDG 15h, sections 2.7.1 and 2.7.2 */
-         if(per_node) {
-            if(number >= 4)
-               die("Processor only has 4 MSR per node\n");
-            return 0xC0010240 + 2*number + (select?0:1);
-         } else {
-            if(number >= 3)
-               die("Processor only has 3 MSR per core\n");
-            return 0xC0010200 + 2*number + (select?0:1);
-         }
-      default:
-         die("Unsupported processor family (%d)\n", family);
-   }
-
-   return 0;
 }
 
 static pid_t gettid(void) {
@@ -274,7 +181,6 @@ void usage (char ** argv) {
 
 void parse_options(int argc, char **argv) {
    int i = 1;
-   int nb_events_per_node = 0;
    for (;;) {
       if (i >= argc)
          break;
@@ -291,21 +197,11 @@ void parse_options(int argc, char **argv) {
          events[nb_events].exclude_user = atoi(argv[i + 4]);
          events[nb_events].per_node = atoi(argv[i + 5]);
 
-         if(has_per_node_msr()) {
-            if(events[nb_events].per_node) {
-               events[nb_events].msr_select = get_msr(nb_events_per_node, 1, 1);
-               events[nb_events].msr_value = get_msr(nb_events_per_node, 1, 0);
-            } else {
-               events[nb_events].msr_select = get_msr(nb_events - nb_events_per_node, 0, 1);
-               events[nb_events].msr_value = get_msr(nb_events - nb_events_per_node, 0, 0);
-            }
-         } else {
-            events[nb_events].msr_select = get_msr(nb_events, 0, 1);
-            events[nb_events].msr_value = get_msr(nb_events, 0, 0);
-         }
+         struct msr *msr = get_msr(events[nb_events].config);
+         events[nb_events].msr_select = msr->select;
+         events[nb_events].msr_value = msr->value;
+         msr->used = 1;
 
-         if(events[nb_events].per_node)
-            nb_events_per_node++;
          nb_events++;
 
          i += 6;
