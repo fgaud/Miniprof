@@ -109,6 +109,6 @@ struct msr {
 };
 
 struct msr* get_msr(uint64_t evt, uint64_t cpu_filter);
-void reserve_msr(int msr_id, int cpu_filter);
+void reserve_msr(int msr_id, uint64_t evt, int cpu_filter);
 
 #endif /* PROFILER_H_ */

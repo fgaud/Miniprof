@@ -201,7 +201,7 @@ void parse_options(int argc, char **argv) {
          struct msr *msr = get_msr(events[nb_events].config, events[nb_events].cpu_filter);
          events[nb_events].msr_select = msr->select;
          events[nb_events].msr_value = msr->value;
-         reserve_msr(msr->id, events[nb_events].cpu_filter);
+         reserve_msr(msr->id, events[nb_events].config, events[nb_events].cpu_filter);
 
          nb_events++;
 

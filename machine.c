@@ -119,13 +119,13 @@ void get_available_msr(void) {
    }
 }
 
-int is_reserved(int msr_id, int cpu_filter, uint64_t evt) {
+int is_reserved(int msr_id, uint64_t evt, int cpu_filter) {
    int i;
    int per_node = is_per_node(evt);
 
    for(i = 0; i < ncpus; i++) {
       if(available_msr_usage[msr_id][i] // msr has been configured on cpu i
-            && ((cpu_filter == -1)      // and we want to use it on all cpu
+            && ((cpu_filter == -1)      // and we wand to use is on all cpu
                || (cpu_filter == i)     // or on this cpu
                || (per_node && (numa_node_of_cpu(cpu_filter) == numa_node_of_cpu(i))))) // or on the same node (and it is a problem)
          return 1;
@@ -133,10 +133,13 @@ int is_reserved(int msr_id, int cpu_filter, uint64_t evt) {
    return 0;
 }
 
-void reserve_msr(int msr_id, int cpu_filter) {
+void reserve_msr(int msr_id, uint64_t evt, int cpu_filter) {
    int i;
+   int per_node = is_per_node(evt);
+
    for(i = 0; i < ncpus; i++) {
-      if(cpu_filter == -1 || cpu_filter == i)
+      if(cpu_filter == -1 || cpu_filter == i
+               || (per_node && (numa_node_of_cpu(cpu_filter) == numa_node_of_cpu(i))))
          available_msr_usage[msr_id][i] = 1;
    }
 }
@@ -150,7 +153,7 @@ struct msr *get_msr(uint64_t evt, uint64_t cpu_filter) {
    /* Perform search in reverse to increase the chance to use MSR 5-3 on 15h */
    /* because these counters can be used on a limited subset of events       */
    for(i = msr_count - 1; i >= 0; i--) {
-      if(!is_reserved(i, cpu_filter, evt) && available_msrs[i].can_be_used(&available_msrs[i], evt)) {
+      if(!is_reserved(i, evt, cpu_filter) && available_msrs[i].can_be_used(&available_msrs[i], evt)) {
          struct msr *msr = malloc(sizeof(*msr));
          memcpy(msr, &available_msrs[i], sizeof(*msr));
          return msr;
