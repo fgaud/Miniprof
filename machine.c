@@ -2,6 +2,8 @@
 
 static int msr_count;
 static struct msr *available_msrs;
+static int **available_msr_usage;
+extern int ncpus;
 
 void cpuid(unsigned info, unsigned *eax, unsigned *ebx, unsigned *ecx, unsigned *edx) {
    *eax = info;
@@ -34,8 +36,12 @@ int can_be_used_10h(struct msr *msr, uint64_t evt) {
    return 1;
 }
 
+int is_per_node(uint64_t evt) {
+   return ((evt & 0xe0) == 0xe0);
+}
+
 int can_be_used_15h(struct msr *msr, uint64_t evt) {
-   if((evt & 0xe0) == 0xe0) {                              /* per node */
+   if(is_per_node(evt)) {
       return (msr->select & 0x40);
    } else {
       if(msr->select & 0x40)
@@ -80,40 +86,63 @@ void get_available_msr(void) {
    case 0x100f00: /* AMD fam10h, see AMD BKDG 10h, section 2.16.1 */
       msr_count = 4;
       available_msrs = malloc(msr_count * sizeof(*available_msrs));
+      available_msr_usage = malloc(msr_count * sizeof(*available_msr_usage));
       for(i = 0; i < msr_count; i++) {
          available_msrs[i].id = i;
          available_msrs[i].select =  0xC0010000 + i;
          available_msrs[i].value =  0xC0010000 + i + 4;
          available_msrs[i].can_be_used = can_be_used_10h;
-         available_msrs[i].used = 0;
+         available_msr_usage[i] = calloc(ncpus, sizeof(*available_msr_usage[i]));
       }
       break;
    case 0x600f00: /* 15h */
       msr_count = 10;
       available_msrs = malloc(msr_count * sizeof(*available_msrs));
+      available_msr_usage = malloc(msr_count * sizeof(*available_msr_usage));
       for(i = 0; i < 6; i++) {
          available_msrs[i].id = i;
          available_msrs[i].select =  0xC0010200 + 2 * i;
          available_msrs[i].value =  0xC0010200 + 2 * i + 1;
          available_msrs[i].can_be_used = can_be_used_15h;
-         available_msrs[i].used = 0;
+         available_msr_usage[i] = calloc(ncpus, sizeof(*available_msr_usage[i]));
       }
       for(i = 6; i < msr_count; i++) {
          available_msrs[i].id = i;
          available_msrs[i].select =  0xC0010240 + 2 * (i - 6);
          available_msrs[i].value =  0xC0010240 + 2 * (i - 6) + 1;
          available_msrs[i].can_be_used = can_be_used_15h;
-         available_msrs[i].used = 0;
+         available_msr_usage[i] = calloc(ncpus, sizeof(*available_msr_usage[i]));
       }
       break;
    default:
       die("Unsupported processor family (%d)\n", family);
    }
+}
 
+int is_reserved(int msr_id, int cpu_filter, uint64_t evt) {
+   int i;
+   int per_node = is_per_node(evt);
+
+   for(i = 0; i < ncpus; i++) {
+      if(available_msr_usage[msr_id][i] // msr has been configured on cpu i
+            && ((cpu_filter == -1)      // and we want to use it on all cpu
+               || (cpu_filter == i)     // or on this cpu
+               || (per_node && (numa_node_of_cpu(cpu_filter) == numa_node_of_cpu(i))))) // or on the same node (and it is a problem)
+         return 1;
+   }
+   return 0;
+}
+
+void reserve_msr(int msr_id, int cpu_filter) {
+   int i;
+   for(i = 0; i < ncpus; i++) {
+      if(cpu_filter == -1 || cpu_filter == i)
+         available_msr_usage[msr_id][i] = 1;
+   }
 }
 
 /* Returns a MSR for a performance monitoring counter. */
-struct msr *get_msr(uint64_t evt) {
+struct msr *get_msr(uint64_t evt, uint64_t cpu_filter) {
    int i;
 
    get_available_msr();
@@ -121,8 +150,11 @@ struct msr *get_msr(uint64_t evt) {
    /* Perform search in reverse to increase the chance to use MSR 5-3 on 15h */
    /* because these counters can be used on a limited subset of events       */
    for(i = msr_count - 1; i >= 0; i--) {
-      if(!available_msrs[i].used && available_msrs[i].can_be_used(&available_msrs[i], evt))
-         return &available_msrs[i];
+      if(!is_reserved(i, cpu_filter, evt) && available_msrs[i].can_be_used(&available_msrs[i], evt)) {
+         struct msr *msr = malloc(sizeof(*msr));
+         memcpy(msr, &available_msrs[i], sizeof(*msr));
+         return msr;
+      }
    }
 
    die("No free msr for event %llx", (long long unsigned)evt);

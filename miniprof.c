@@ -122,10 +122,10 @@ static void* thread_loop(void *pdata) {
    set_affinity(gettid(), data->core);
 
    for (i = 0; i < data->nb_events; i++) {
-      if (data->events[i].per_node && !monitor_node_events) {
-         /* ignore this event */
+      if (data->events[i].per_node && !monitor_node_events) 
          continue;
-      }
+      if (data->events[i].cpu_filter != -1 && data->core != data->events[i].cpu_filter) 
+         continue;
       event_mask = data->events[i].config;
       event_mask |= 0x530000; /* see README */
       if(data->events[i].exclude_kernel)
@@ -147,10 +147,10 @@ static void* thread_loop(void *pdata) {
 
       rdtscll(rdtsc);
       for (i = 0; i < data->nb_events; i++) {
-         if (data->events[i].per_node && !monitor_node_events) {
-            /* ignore this event */
+         if (data->events[i].per_node && !monitor_node_events) 
             continue;
-         }
+         if (data->events[i].cpu_filter != -1 && data->core != data->events[i].cpu_filter) 
+            continue;
 
          single_count = rdmsr(data->core, data->events[i].msr_value);
 
@@ -168,13 +168,13 @@ static void* thread_loop(void *pdata) {
 }
 
 void usage (char ** argv) {
-   printf("Usage: %s [-e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_NODE] [-ft] [-h]\n", argv[0]);
+   printf("Usage: %s [-e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USERLAND CPU_FILTER] [-ft] [-h]\n", argv[0]);
    printf("-e: hardware events\n");
    printf("\tNAME: You can give any name to the counter\n");
-   printf("\tCOUNTER: Same format as raw perf events, except that it starts by 0x istead of r\n");
-   printf("\tEXCLUDE_KERNEL: Do not include kernel-level samples\n");
+   printf("\tCOUNTER: Same format as raw perf events, except that it starts by 0x instead of r\n");
+   printf("\tEXCLUDE_KERNEL: Do not include kernel-level samples when sety\n");
    printf("\tEXCLUDE_USER: Do not include user-level samples\n");
-   printf("\tPER_NODE: Is this counter an off-core counter (will be monitored on a single core per NUMA node) ?\n\n");
+   printf("\tCPU_FILTER: 0=monitor on all cores, 1=monitor on 1 cpu per node, -X=monitor only on cpu X\n\n");
 
    printf("-ft: fake threads (put threads that spinloop with low priority on all cores)\n\n");
 }
@@ -186,7 +186,7 @@ void parse_options(int argc, char **argv) {
          break;
       if (!strcmp(argv[i], "-e")) {
          if (i + 5 >= argc)
-            die("Missing argument for -e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER PER_NODE\n");
+            die("Missing argument for -e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USER CPU_FILTER\n");
                 
          events = realloc(events, (nb_events + 1) * sizeof(*events));
          events[nb_events].name = strdup(argv[i + 1]);
@@ -195,12 +195,13 @@ void parse_options(int argc, char **argv) {
          events[nb_events].exclude_kernel = atoi(argv[i + 3]);
          events[nb_events].exclude_user = atoi(argv[i + 4]);
          events[nb_events].exclude_user = atoi(argv[i + 4]);
-         events[nb_events].per_node = atoi(argv[i + 5]);
+         events[nb_events].per_node = (atoi(argv[i + 5]) == 1);
+         events[nb_events].cpu_filter = (*argv[i + 5] == '-')?-(atoi(argv[i + 5])):-1;
 
-         struct msr *msr = get_msr(events[nb_events].config);
+         struct msr *msr = get_msr(events[nb_events].config, events[nb_events].cpu_filter);
          events[nb_events].msr_select = msr->select;
          events[nb_events].msr_value = msr->value;
-         msr->used = 1;
+         reserve_msr(msr->id, events[nb_events].cpu_filter);
 
          nb_events++;
 
@@ -281,8 +282,16 @@ int main(int argc, char**argv) {
 
    /* Print list of monitored events */
    for (i = 0; i < nb_events; i++) {
-      printf("#Event %d: %s (%llx) (Exclude Kernel: %s; Exclude User: %s, Per node: %s)\n", i, events[i].name, (long long unsigned) events[i].config, (events[i].exclude_kernel) ? "yes" : "no",
-            (events[i].exclude_user) ? "yes" : "no", (events[i].per_node) ? "yes" : "no");
+      char core_str[3];
+      snprintf(core_str,sizeof(core_str), "%d", events[i].cpu_filter);
+      printf("#Event %d: %s (%llx) (Exclude Kernel: %s, Exclude User: %s, Per node: %s, Configured core(s): %s)\n", 
+            i, 
+            events[i].name, 
+            (long long unsigned) events[i].config, 
+            (events[i].exclude_kernel) ? "yes" : "no", 
+            (events[i].exclude_user) ? "yes" : "no", 
+            (events[i].per_node) ? "yes" : "no", 
+            events[i].cpu_filter == -1 ? "all" : core_str);
    }
 
    int nb_threads = ncpus;

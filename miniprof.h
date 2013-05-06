@@ -76,6 +76,7 @@ typedef struct _event {
 
    const char* name;
    char per_node;
+   int32_t cpu_filter;
 
    /* Id of the MSR control register that will be used to monitor the event */
    uint64_t msr_select; 
@@ -104,10 +105,10 @@ struct msr {
    int id;
    uint64_t select;
    uint64_t value;
-   int used;
    int (*can_be_used)(struct msr*, uint64_t);
 };
 
-struct msr* get_msr(uint64_t evt);
+struct msr* get_msr(uint64_t evt, uint64_t cpu_filter);
+void reserve_msr(int msr_id, int cpu_filter);
 
 #endif /* PROFILER_H_ */
