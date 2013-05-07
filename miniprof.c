@@ -236,6 +236,10 @@ int main(int argc, char**argv) {
    signal(SIGTERM, sig_handler);
    signal(SIGINT, sig_handler);
 
+   // Parse options need these to be defined...
+   ncpus = get_nprocs(); 
+   nnodes = numa_num_configured_nodes(); 
+
    // Parse options
    parse_options(argc, argv);
    if(!nb_events) {
@@ -246,8 +250,6 @@ int main(int argc, char**argv) {
    /* Load the kernel module for MSR access */
    if(system("sudo modprobe msr")) {};
 
-   ncpus = get_nprocs(); 
-   nnodes = numa_num_configured_nodes(); 
 
    printf("#NB cpus :\t%d\n", ncpus);
    printf("#NB nodes :\t%d\n", nnodes);
