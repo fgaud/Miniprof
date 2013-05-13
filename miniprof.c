@@ -25,11 +25,12 @@ int nnodes;
 int * cores_monitoring_node_events;
 
 /* sampling period (time interval between two dumps of the performance counters) */
-static int sleep_time = 100 * TIME_MSECOND;
+static int sleep_time = 1000 * TIME_MSECOND;
 
-
-static int nb_events = 0;
 static event_t *events = NULL;
+static int nb_events = 0;
+
+static long sys_perf_counter_open(struct perf_event_attr *hw_event, pid_t pid, int cpu, int group_fd, unsigned long flags);
 
 static uint64_t hex2u64(const char *ptr);
 static void sig_handler(int signal);
@@ -37,8 +38,45 @@ static int wrmsr(int cpu, uint32_t msr, uint64_t val);
 static uint64_t rdmsr(int cpu, uint32_t msr);
 static void stop_all_pmu(void);
 
-
 static int with_fake_threads = 0;
+
+
+// This code is directly imported from <linux_src>/tools/perf/util/parse-events.c
+struct event_symbol {
+   const char  *symbol;                                                                                                                                                                                       
+};
+
+static struct event_symbol event_symbols_sw[PERF_COUNT_SW_MAX] = {
+   [PERF_COUNT_SW_CPU_CLOCK] = {
+      .symbol = "cpu-clock",
+   },
+   [PERF_COUNT_SW_TASK_CLOCK] = {
+      .symbol = "task-clock",
+   },
+   [PERF_COUNT_SW_PAGE_FAULTS] = {
+      .symbol = "page-faults",
+   },
+   [PERF_COUNT_SW_CONTEXT_SWITCHES] = {
+      .symbol = "context-switches",
+   },
+   [PERF_COUNT_SW_CPU_MIGRATIONS] = {
+      .symbol = "cpu-migrations",
+   },
+   [PERF_COUNT_SW_PAGE_FAULTS_MIN] = {
+      .symbol = "minor-faults",
+   },
+   [PERF_COUNT_SW_PAGE_FAULTS_MAJ] = {
+      .symbol = "major-faults",
+   },
+   [PERF_COUNT_SW_ALIGNMENT_FAULTS] = {
+      .symbol = "alignment-faults",
+   },
+   [PERF_COUNT_SW_EMULATION_FAULTS] = {
+      .symbol = "emulation-faults",
+   },                                                                                                                                                            
+};
+
+
 
 uint64_t get_cpu_freq(void) {
    FILE *fd;
@@ -121,44 +159,76 @@ static void* thread_loop(void *pdata) {
 
    set_affinity(gettid(), data->core);
 
-   for (i = 0; i < data->nb_events; i++) {
-      if (data->events[i].per_node && !monitor_node_events) 
+   for (i = 0; i < nb_events; i++) {
+      if (events[i].per_node && !monitor_node_events) 
          continue;
-      if (data->events[i].cpu_filter != -1 && data->core != data->events[i].cpu_filter) 
+      if (events[i].cpu_filter != -1 && data->core != events[i].cpu_filter) 
          continue;
-      event_mask = data->events[i].config;
-      event_mask |= 0x530000; /* see README */
-      if(data->events[i].exclude_kernel)
-         event_mask &= ~(0x020000ll);
-      if(data->events[i].exclude_user)   
-         event_mask &= ~(0x010000ll);
 
-      wrmsr(data->core, data->events[i].msr_select, event_mask);
-      wrmsr(data->core, data->events[i].msr_value, 0);
+      if(events[i].type == PERF_TYPE_RAW) {
+         event_mask = events[i].config;
+         event_mask |= 0x530000; /* see README */
+         if(events[i].exclude_kernel)
+            event_mask &= ~(0x020000ll);
+         if(events[i].exclude_user)   
+            event_mask &= ~(0x010000ll);
+
+         wrmsr(data->core, events[i].msr_select, event_mask);
+         wrmsr(data->core, events[i].msr_value, 0);
+      }
+      else {
+         events[i].event_attr.size = sizeof(struct perf_event_attr);
+         events[i].event_attr.type = events[i].type;
+         events[i].event_attr.config = events[i].config;
+         events[i].event_attr.exclude_kernel = events[i].exclude_kernel;
+         events[i].event_attr.exclude_user = events[i].exclude_user;
+
+         events[i].event_attr.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
+
+         printf("Data->core = %d\n", data->core);
+         events[i].fd = sys_perf_counter_open(&events[i].event_attr, -1, data->core, -1, 0);
+         if (events[i].fd < 0) {
+            thread_die("#[%d] sys_perf_counter_open failed: %s", data->core, strerror(errno));
+         }
+      }
    }
 
-   uint64_t *last_counts = calloc(data->nb_events, sizeof(*last_counts));
+   struct perf_read_ev *last_counts = calloc(nb_events, sizeof(struct perf_read_ev));
    int logical_time = 0;
    while (1) {
-      uint64_t single_count;
+      struct perf_read_ev single_count;
       uint64_t rdtsc;
 
       logical_time++;
 
       rdtscll(rdtsc);
-      for (i = 0; i < data->nb_events; i++) {
-         if (data->events[i].per_node && !monitor_node_events) 
-            continue;
-         if (data->events[i].cpu_filter != -1 && data->core != data->events[i].cpu_filter) 
-            continue;
-
-         single_count = rdmsr(data->core, data->events[i].msr_value);
-
-         uint64_t value = single_count - last_counts[i];
+      for (i = 0; i < nb_events; i++) {
          double percent_running = 1.;
+         uint64_t value;
+
+         if (events[i].per_node && !monitor_node_events) 
+            continue;
+         if (events[i].cpu_filter != -1 && data->core != events[i].cpu_filter) 
+            continue;
+
+         if(events[i].type == PERF_TYPE_RAW) {
+            single_count.value = rdmsr(data->core, events[i].msr_value);
+            value = single_count.value - last_counts[i].value;
+            last_counts[i] = single_count;
+         }
+         else {
+            assert(read(events[i].fd, &single_count, sizeof(single_count)) == sizeof(single_count));
+
+            value = single_count.value - last_counts[i].value;
+
+            uint64_t time_running = single_count.time_running - last_counts[i].time_running;
+            uint64_t time_enabled = single_count.time_enabled - last_counts[i].time_enabled;
+            percent_running = (double) time_running / (double) time_enabled;
+
+            last_counts[i] = single_count;
+         }
 
          printf("%d\t%d\t%llu\t%llu\t%.3f\t%d\n", i, data->core, (long long unsigned) rdtsc, (long long unsigned) value, percent_running, logical_time);
-         last_counts[i] = single_count;
       }
 
       usleep(sleep_time);
@@ -168,6 +238,8 @@ static void* thread_loop(void *pdata) {
 }
 
 void usage (char ** argv) {
+   int i;
+
    printf("Usage: %s [-e NAME COUNTER EXCLUDE_KERNEL EXCLUDE_USERLAND CPU_FILTER] [-ft] [-h]\n", argv[0]);
    printf("-e: hardware events\n");
    printf("\tNAME: You can give any name to the counter\n");
@@ -175,6 +247,14 @@ void usage (char ** argv) {
    printf("\tEXCLUDE_KERNEL: Do not include kernel-level samples when sety\n");
    printf("\tEXCLUDE_USER: Do not include user-level samples\n");
    printf("\tCPU_FILTER: 0=monitor on all cores, 1=monitor on 1 cpu per node, -X=monitor only on cpu X\n\n");
+
+   printf("-s: software events\n");
+   printf("\tCOUNTER: Must be a software event. Supported events are:\n");
+   for (i = 0; i < PERF_COUNT_SW_MAX; i++) {
+      printf("\t\t%s\n", event_symbols_sw[i].symbol); 
+   } 
+   printf("\tEXCLUDE_KERNEL: Do not include kernel-level samples\n");
+   printf("\tEXCLUDE_USER: Do not include user-level samples\n\n");
 
    printf("-ft: fake threads (put threads that spinloop with low priority on all cores)\n\n");
 }
@@ -206,6 +286,37 @@ void parse_options(int argc, char **argv) {
          nb_events++;
 
          i += 6;
+      }
+      else if (!strcmp(argv[i], "-s")) {
+         int j;
+
+         if (i + 3 >= argc)
+            die("Missing argument for -e COUNTER EXCLUDE_KERNEL EXCLUDE_USER\n");
+         events = realloc(events, (nb_events + 1) * sizeof(*events));
+         events[nb_events].name = strdup(argv[i + 1]);
+         events[nb_events].type = PERF_TYPE_SOFTWARE;
+
+         events[nb_events].per_node = 0;
+         events[nb_events].cpu_filter = -1;
+
+         // Looking for the event number
+         for (j = 0; j < PERF_COUNT_SW_MAX; j++) {
+            if(! strcmp(event_symbols_sw[j].symbol, argv[i + 1]))
+               break;
+         } 
+
+         if(j == PERF_COUNT_SW_MAX) {
+            usage(argv);
+            printf("\n%s is not a valid software event\n", argv[i + 1]);
+            exit(1);
+         }
+        
+         events[nb_events].config = j;
+         events[nb_events].exclude_kernel = atoi(argv[i + 2]);
+         events[nb_events].exclude_user = atoi(argv[i + 3]);
+         nb_events++;
+
+         i += 4;
       }
       else if (!strcmp(argv[i], "-ft")) {
          with_fake_threads = 1;
@@ -308,9 +419,6 @@ int main(int argc, char**argv) {
       pdata_t *data = calloc(1, sizeof(*data));
       data->core = i;
 
-      data->nb_events = nb_events;
-      data->events = events;
-
       if(with_fake_threads) {
          pthread_create(&threads[i], NULL, spin_loop, data);
       }
@@ -330,6 +438,17 @@ int main(int argc, char**argv) {
    /* This place is never reached when there are no errors */
    printf("#END??\n");
    return 0;
+}
+
+static long sys_perf_counter_open(struct perf_event_attr *hw_event, pid_t pid, int cpu, int group_fd, unsigned long flags) {
+   int ret = syscall(__NR_perf_counter_open, hw_event, pid, cpu, group_fd, flags);
+#  if defined(__x86_64__) || defined(__i386__)
+   if (ret < 0 && ret > -4096) {
+      errno = -ret;
+      ret = -1;
+   }
+#  endif
+   return ret;
 }
 
 static void sig_handler(int signal) {
@@ -426,10 +545,12 @@ void stop_all_pmu() {
    int cpu, msr;
    for(cpu = 0; cpu < ncpus; cpu++) {
       for(msr = 0; msr < nb_events; msr++) {
-         // Stop counting event
-         wrmsr(cpu, events[msr].msr_select, 0);
-         // Do NOT reset value msr to avoid reading something inconsistent
-         //wrmsr(cpu, events[msr].msr_value, 0); 
+         if(events[msr].type == PERF_TYPE_RAW) {
+            // Stop counting event
+            wrmsr(cpu, events[msr].msr_select, 0);
+            // Do NOT reset value msr to avoid reading something inconsistent
+            //wrmsr(cpu, events[msr].msr_value, 0); 
+         }
       }
    }
 }

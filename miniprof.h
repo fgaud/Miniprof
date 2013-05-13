@@ -52,6 +52,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define TIME_MSECOND            1000
 #define PAGE_SIZE               (4*1024)
 
+#undef __NR_perf_counter_open
+#if defined(__x86_64__)
+#define __NR_perf_counter_open  298
+#elif defined(__i386__)
+#define __NR_perf_counter_open  336
+#endif
+
 #define die(msg, args...) \
 do {                         \
             fprintf(stderr,"(%s,%d) " msg "\n", __FUNCTION__ , __LINE__, ##args); \
@@ -65,7 +72,6 @@ do {                         \
          } while(0)
 
 typedef struct _event {
-   /* Useless msr branch (we only monitor "raw" events) */
    uint64_t type;
    /* Value describing the chosen event and unitmask (see README). */
    uint64_t config;
@@ -78,11 +84,28 @@ typedef struct _event {
    char per_node;
    int32_t cpu_filter;
 
-   /* Id of the MSR control register that will be used to monitor the event */
-   uint64_t msr_select; 
-   /* Id of the MSR counter register that will be used to monitor the event */
-   uint64_t msr_value; 
+   union {
+      struct {
+         /** Only meaningful for hardware events **/
+         /* Id of the MSR control register that will be used to monitor the event */
+         uint64_t msr_select; 
+         /* Id of the MSR counter register that will be used to monitor the event */
+         uint64_t msr_value; 
+      };
+      struct {
+         /** Only meaningful for software events **/
+         int fd;
+         struct perf_event_attr event_attr;
+      };
+   };
 } event_t;
+
+
+struct perf_read_ev {
+   uint64_t value;
+   uint64_t time_enabled;
+   uint64_t time_running;
+};
 
 #ifdef __x86_64__
 #define rdtscll(val) {                                           \
@@ -96,8 +119,6 @@ typedef struct _event {
 
 typedef struct pdata {
    int core;
-   int nb_events;
-   event_t *events;
 } pdata_t;
 
 struct msr {
