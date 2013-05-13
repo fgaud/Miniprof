@@ -98,7 +98,6 @@ typedef struct pdata {
    int core;
    int nb_events;
    event_t *events;
-   int tid; /* Tid to observe (useless in msr branch) */
 } pdata_t;
 
 struct msr {
