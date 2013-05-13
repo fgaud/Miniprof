@@ -185,7 +185,6 @@ static void* thread_loop(void *pdata) {
 
          events[i].event_attr.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
 
-         printf("Data->core = %d\n", data->core);
          events[i].fd = sys_perf_counter_open(&events[i].event_attr, -1, data->core, -1, 0);
          if (events[i].fd < 0) {
             thread_die("#[%d] sys_perf_counter_open failed: %s", data->core, strerror(errno));
