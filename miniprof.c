@@ -37,6 +37,7 @@ static void sig_handler(int signal);
 static int wrmsr(int cpu, uint32_t msr, uint64_t val);
 static uint64_t rdmsr(int cpu, uint32_t msr);
 static void stop_all_pmu(void);
+static void disable_nmi_watchdog(void);
 
 static int with_fake_threads = 0;
 
@@ -350,7 +351,8 @@ int main(int argc, char**argv) {
 
    // Parse options need these to be defined...
    ncpus = get_nprocs(); 
-   nnodes = numa_num_configured_nodes(); 
+   nnodes = numa_num_configured_nodes();
+   disable_nmi_watchdog();
 
    // Parse options
    parse_options(argc, argv);
@@ -554,4 +556,8 @@ void stop_all_pmu() {
          }
       }
    }
+}
+
+static void disable_nmi_watchdog() {
+   if(system("echo 0 > /proc/sys/kernel/nmi_watchdog")) { /* nothing, error already printed by system() */ };
 }
