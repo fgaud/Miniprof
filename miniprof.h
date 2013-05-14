@@ -84,20 +84,11 @@ typedef struct _event {
    char per_node;
    int32_t cpu_filter;
 
-   union {
-      struct {
-         /** Only meaningful for hardware events **/
-         /* Id of the MSR control register that will be used to monitor the event */
-         uint64_t msr_select; 
-         /* Id of the MSR counter register that will be used to monitor the event */
-         uint64_t msr_value; 
-      };
-      struct {
-         /** Only meaningful for software events **/
-         int fd;
-         struct perf_event_attr event_attr;
-      };
-   };
+   /** Only meaningful for hardware events **/
+   /* Id of the MSR control register that will be used to monitor the event */
+   uint64_t msr_select; 
+   /* Id of the MSR counter register that will be used to monitor the event */
+   uint64_t msr_value; 
 } event_t;
 
 

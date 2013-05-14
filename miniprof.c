@@ -152,6 +152,12 @@ static void* thread_loop(void *pdata) {
    uint64_t event_mask;
    pdata_t *data = (pdata_t*) pdata;
 
+   /** Could be optimized because that's only meaninglu for software events **/
+   struct perf_event_attr * event_attr = calloc(nb_events, sizeof(struct perf_event_attr));
+   int * fd = (int*) malloc(nb_events * sizeof(int));
+
+   assert(fd && event_attr);
+
    int monitor_node_events = 0;
    for (i = 0; i < nnodes; i++) {
       if (cores_monitoring_node_events[i] == data->core)
@@ -178,18 +184,16 @@ static void* thread_loop(void *pdata) {
          wrmsr(data->core, events[i].msr_value, 0);
       }
       else if (events[i].type == PERF_TYPE_SOFTWARE) {
-         memset(&events[i].event_attr, 0, sizeof(struct perf_event_attr));
+         event_attr[i].size = sizeof(struct perf_event_attr);
+         event_attr[i].type = events[i].type;
+         event_attr[i].config = events[i].config;
+         event_attr[i].exclude_kernel = events[i].exclude_kernel;
+         event_attr[i].exclude_user = events[i].exclude_user;
 
-         events[i].event_attr.size = sizeof(struct perf_event_attr);
-         events[i].event_attr.type = events[i].type;
-         events[i].event_attr.config = events[i].config;
-         events[i].event_attr.exclude_kernel = events[i].exclude_kernel;
-         events[i].event_attr.exclude_user = events[i].exclude_user;
+         event_attr[i].read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
 
-         events[i].event_attr.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
-
-         events[i].fd = sys_perf_counter_open(&events[i].event_attr, -1, data->core, -1, 0);
-         if (events[i].fd < 0) {
+         fd[i] = sys_perf_counter_open(&event_attr[i], -1, data->core, -1, 0);
+         if (fd[i] < 0) {
             thread_die("#[%d] sys_perf_counter_open failed for counter %s: %s", data->core, events[i].name, strerror(errno));
          }
       }
@@ -220,7 +224,7 @@ static void* thread_loop(void *pdata) {
             single_count.value = rdmsr(data->core, events[i].msr_value);
          }
          else {
-            assert(read(events[i].fd, &single_count, sizeof(single_count)) == sizeof(single_count));
+            assert(read(fd[i], &single_count, sizeof(single_count)) == sizeof(single_count));
 
             uint64_t time_running = single_count.time_running - last_counts[i].time_running;
             uint64_t time_enabled = single_count.time_enabled - last_counts[i].time_enabled;
