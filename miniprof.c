@@ -176,7 +176,9 @@ static void* thread_loop(void *pdata) {
          wrmsr(data->core, events[i].msr_select, event_mask);
          wrmsr(data->core, events[i].msr_value, 0);
       }
-      else {
+      else if (events[i].type == PERF_TYPE_SOFTWARE) {
+         memset(&events[i].event_attr, 0, sizeof(struct perf_event_attr));
+
          events[i].event_attr.size = sizeof(struct perf_event_attr);
          events[i].event_attr.type = events[i].type;
          events[i].event_attr.config = events[i].config;
@@ -187,8 +189,11 @@ static void* thread_loop(void *pdata) {
 
          events[i].fd = sys_perf_counter_open(&events[i].event_attr, -1, data->core, -1, 0);
          if (events[i].fd < 0) {
-            thread_die("#[%d] sys_perf_counter_open failed: %s", data->core, strerror(errno));
+            thread_die("#[%d] sys_perf_counter_open failed for counter %s: %s", data->core, events[i].name, strerror(errno));
          }
+      }
+      else {
+         thread_die("Unknown perf type: %lu\n", events[i].type);
       }
    }
 
@@ -212,20 +217,17 @@ static void* thread_loop(void *pdata) {
 
          if(events[i].type == PERF_TYPE_RAW) {
             single_count.value = rdmsr(data->core, events[i].msr_value);
-            value = single_count.value - last_counts[i].value;
-            last_counts[i] = single_count;
          }
          else {
             assert(read(events[i].fd, &single_count, sizeof(single_count)) == sizeof(single_count));
-
-            value = single_count.value - last_counts[i].value;
 
             uint64_t time_running = single_count.time_running - last_counts[i].time_running;
             uint64_t time_enabled = single_count.time_enabled - last_counts[i].time_enabled;
             percent_running = (double) time_running / (double) time_enabled;
 
-            last_counts[i] = single_count;
          }
+         value = single_count.value - last_counts[i].value;
+         last_counts[i] = single_count;
 
          printf("%d\t%d\t%llu\t%llu\t%.3f\t%d\n", i, data->core, (long long unsigned) rdtsc, (long long unsigned) value, percent_running, logical_time);
       }
