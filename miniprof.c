@@ -41,6 +41,8 @@ static void disable_nmi_watchdog(void);
 
 static int with_fake_threads = 0;
 
+static int global_exclude_kernel = 0;
+static int global_exclude_user = 0;
 
 // This code is directly imported from <linux_src>/tools/perf/util/parse-events.c
 struct event_symbol {
@@ -263,6 +265,8 @@ void usage (char ** argv) {
    printf("\tEXCLUDE_USER: Do not include user-level samples\n\n");
 
    printf("-ft: fake threads (put threads that spinloop with low priority on all cores)\n\n");
+
+   printf("--exclude-kernel\n--exclude-user\n\tglobal switches (override per event switches)\n");
 }
 
 void parse_options(int argc, char **argv) {
@@ -328,6 +332,16 @@ void parse_options(int argc, char **argv) {
          with_fake_threads = 1;
          /* see spin_loop for details */
          printf("#WARNING: with fake threads\n");
+         i++;
+      }
+      else if (!strcmp(argv[i], "--exclude-user")) {
+         global_exclude_user = 1;
+         printf("#WARNING: global exclude user set\n");
+         i++;
+      }
+      else if (!strcmp(argv[i], "--exclude-kernel")) {
+         global_exclude_kernel = 1;
+         printf("#WARNING: global exclude kernel set\n");
          i++;
       }
       else if (!strcmp(argv[i], "-h")) {
@@ -402,6 +416,14 @@ int main(int argc, char**argv) {
 
    /* Print list of monitored events */
    for (i = 0; i < nb_events; i++) {
+      if(global_exclude_user) {
+         events[i].exclude_user = 1;
+      }
+
+      if(global_exclude_kernel) {
+         events[i].exclude_kernel = 1;
+      }
+
       char core_str[3];
       snprintf(core_str,sizeof(core_str), "%d", events[i].cpu_filter);
       printf("#Event %d: %s (%llx) (Exclude Kernel: %s, Exclude User: %s, Per node: %s, Configured core(s): %s)\n", 
