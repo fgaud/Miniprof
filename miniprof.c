@@ -56,6 +56,9 @@ static void disable_nmi_watchdog(void);
 
 static int with_fake_threads = 0;
 
+static int global_exclude_kernel = 0;
+static int global_exclude_user = 0;
+
 uint64_t get_cpu_freq(void) {
    FILE *fd;
    uint64_t freq = 0;
@@ -231,6 +234,8 @@ void usage (char ** argv) {
    
    printf("-a\n");
    printf("\tAPP_NAME: same as -t but with the application name\n");
+
+   printf("--exclude-kernel\n--exclude-user\n\tglobal switches (override per event switches)\n");
 }
 
 void parse_options(int argc, char **argv) {
@@ -300,6 +305,16 @@ void parse_options(int argc, char **argv) {
          printf("#WARNING: with fake threads\n");
          i++;
       }
+      else if (!strcmp(argv[i], "--exclude-user")) {
+         global_exclude_user = 1;
+         printf("#WARNING: global exclude user set\n");
+         i++;
+      }
+      else if (!strcmp(argv[i], "--exclude-kernel")) {
+         global_exclude_kernel = 1;
+         printf("#WARNING: global exclude kernel set\n");
+         i++;
+      }
       else if (!strcmp(argv[i], "-h")) {
          usage(argv);
          exit(0);
@@ -360,6 +375,14 @@ int main(int argc, char**argv) {
 
    printf("#Clock speed: %llu\n", (long long unsigned) clk_speed);
    for (i = 0; i < nb_events; i++) {
+      if(global_exclude_user) {
+         events[i].exclude_user = 1;
+      }
+
+      if(global_exclude_kernel) {
+         events[i].exclude_kernel = 1;
+      }
+
       printf("#Event %d: %s (%llx) (Exclude Kernel: %s; Exclude User: %s, Per node: %s)\n", i, events[i].name, (long long unsigned) events[i].config, (events[i].exclude_kernel) ? "yes" : "no",
             (events[i].exclude_user) ? "yes" : "no", (events[i].per_node) ? "yes" : "no");
    }
