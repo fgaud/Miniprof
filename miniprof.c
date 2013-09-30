@@ -71,12 +71,16 @@ static struct event_symbol event_symbols_sw[PERF_COUNT_SW_MAX] = {
    [PERF_COUNT_SW_PAGE_FAULTS_MAJ] = {
       .symbol = "major-faults",
    },
+#ifdef PERF_COUNT_SW_ALIGNMENT_FAULTS
    [PERF_COUNT_SW_ALIGNMENT_FAULTS] = {
       .symbol = "alignment-faults",
    },
+#endif
+#ifdef PERF_COUNT_SW_EMULATION_FAULTS
    [PERF_COUNT_SW_EMULATION_FAULTS] = {
       .symbol = "emulation-faults",
-   },                                                                                                                                                            
+   },
+#endif
 };
 
 
