@@ -49,7 +49,9 @@ my $miniprof_thr = async {
    system($mini_cmd);
 };
 
-my $cmd = join(" ", @ARGV[$first_app_arg..$#ARGV]);
+my @args = @ARGV[$first_app_arg..$#ARGV];
+for(@args) { s/ /\\ /g };
+my $cmd = join(" ", @args);
 system($cmd);
 
 print `sudo killall miniprof`;
