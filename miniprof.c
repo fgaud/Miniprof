@@ -320,8 +320,12 @@ void parse_options(int argc, char **argv) {
          } 
 
          if(j == PERF_COUNT_SW_MAX) {
-            usage(argv);
             printf("\n%s is not a valid software event\n", argv[i + 1]);
+            printf("Supported events are:\n");
+            for (j = 0; j < PERF_COUNT_SW_MAX; j++) {
+               printf("\t%s\n", event_symbols_sw[j].symbol);
+            } 
+
             exit(1);
          }
         
