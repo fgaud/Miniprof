@@ -110,6 +110,7 @@ struct perf_read_ev {
 
 typedef struct pdata {
    int core;
+   int tid; /* Tid to observe */
 } pdata_t;
 
 struct msr {

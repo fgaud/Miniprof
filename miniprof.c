@@ -30,6 +30,9 @@ static int sleep_time = 1000 * TIME_MSECOND;
 static event_t *events = NULL;
 static int nb_events = 0;
 
+static int nb_observed_pids = 0;
+static int *observed_pids;
+
 static long sys_perf_counter_open(struct perf_event_attr *hw_event, pid_t pid, int cpu, int group_fd, unsigned long flags);
 
 static uint64_t hex2u64(const char *ptr);
@@ -43,6 +46,8 @@ static int with_fake_threads = 0;
 
 static int global_exclude_kernel = 0;
 static int global_exclude_user = 0;
+static int global_use_msr = 0;
+
 
 // This code is directly imported from <linux_src>/tools/perf/util/parse-events.c
 struct event_symbol {
@@ -111,6 +116,29 @@ uint64_t get_cpu_freq(void) {
    return freq;
 }
 
+void add_tid(int tid) {
+   observed_pids = realloc(observed_pids, (nb_observed_pids + 1) * sizeof(*observed_pids));
+   observed_pids[nb_observed_pids] = tid;
+   nb_observed_pids++;
+}
+
+int get_tids_of_app(char *app) {
+   int nb_tids_found = 0, pid;
+
+   char buffer[1024];
+   FILE *procs = popen("ps -A -L -o lwp= -o comm=", "r");
+   while (fscanf(procs, "%d %s\n", &pid, buffer) == 2) {
+      if (!strcmp(buffer, app)) {
+         printf("#Matching pid: %d (%s)\n", (int) pid, buffer);
+         nb_tids_found++;
+         add_tid(pid);
+      }
+   }
+   fclose(procs);
+
+   return nb_tids_found;
+}
+
 static pid_t gettid(void) {
    return syscall(__NR_gettid);
 }
@@ -154,11 +182,11 @@ void* spin_loop(void *pdata) {
  * all cores (resp. nodes).
  */
 static void* thread_loop(void *pdata) {
-   int i;
+   int i, watch_tid;
    uint64_t event_mask;
    pdata_t *data = (pdata_t*) pdata;
+   watch_tid = (data->tid != 0);
 
-   /** Could be optimized because that's only meaninglu for software events **/
    struct perf_event_attr * event_attr = calloc(nb_events, sizeof(struct perf_event_attr));
    int * fd = (int*) malloc(nb_events * sizeof(int));
 
@@ -170,7 +198,9 @@ static void* thread_loop(void *pdata) {
          monitor_node_events = 1;
    }
 
-   set_affinity(gettid(), data->core);
+   if (!watch_tid) {
+      set_affinity(gettid(), data->core);
+   }
 
    for (i = 0; i < nb_events; i++) {
       if (events[i].per_node && !monitor_node_events) 
@@ -178,7 +208,7 @@ static void* thread_loop(void *pdata) {
       if (events[i].cpu_filter != -1 && data->core != events[i].cpu_filter) 
          continue;
 
-      if(events[i].type == PERF_TYPE_RAW) {
+      if(events[i].type == PERF_TYPE_RAW && global_use_msr) {
          event_mask = events[i].config;
          event_mask |= 0x530000; /* see README */
          if(events[i].exclude_kernel)
@@ -189,7 +219,7 @@ static void* thread_loop(void *pdata) {
          wrmsr(data->core, events[i].msr_select, event_mask);
          wrmsr(data->core, events[i].msr_value, 0);
       }
-      else if (events[i].type == PERF_TYPE_SOFTWARE) {
+      else {
          event_attr[i].size = sizeof(struct perf_event_attr);
          event_attr[i].type = events[i].type;
          event_attr[i].config = events[i].config;
@@ -198,13 +228,10 @@ static void* thread_loop(void *pdata) {
 
          event_attr[i].read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
 
-         fd[i] = sys_perf_counter_open(&event_attr[i], -1, data->core, -1, 0);
+         fd[i] = sys_perf_counter_open(&event_attr[i], watch_tid ? data->tid : -1, watch_tid ? -1 : data->core, -1, 0);
          if (fd[i] < 0) {
-            thread_die("#[%d] sys_perf_counter_open failed for counter %s: %s", data->core, events[i].name, strerror(errno));
+            thread_die("#[%d] sys_perf_counter_open failed for counter %s: %s", watch_tid ? data->tid : data->core, events[i].name, strerror(errno));
          }
-      }
-      else {
-         thread_die("Unknown perf type: %lu\n", events[i].type);
       }
    }
 
@@ -226,7 +253,7 @@ static void* thread_loop(void *pdata) {
          if (events[i].cpu_filter != -1 && data->core != events[i].cpu_filter) 
             continue;
 
-         if(events[i].type == PERF_TYPE_RAW) {
+         if(events[i].type == PERF_TYPE_RAW && global_use_msr) {
             single_count.value = rdmsr(data->core, events[i].msr_value);
          }
          else {
@@ -240,7 +267,7 @@ static void* thread_loop(void *pdata) {
          value = single_count.value - last_counts[i].value;
          last_counts[i] = single_count;
 
-         printf("%d\t%d\t%llu\t%llu\t%.3f\t%d\n", i, data->core, (long long unsigned) rdtsc, (long long unsigned) value, percent_running, logical_time);
+         printf("%d\t%d\t%llu\t%llu\t%.3f\t%d\n", i, watch_tid ? data->tid : data->core, (long long unsigned) rdtsc, (long long unsigned) value, percent_running, logical_time);
       }
 
       usleep(sleep_time);
@@ -268,9 +295,17 @@ void usage (char ** argv) {
    printf("\tEXCLUDE_KERNEL: Do not include kernel-level samples\n");
    printf("\tEXCLUDE_USER: Do not include user-level samples\n\n");
 
+   printf("-t\n");
+   printf("\tTID: do a per-tid profiling instead of a per-core profiling and consider this TID\n\n");
+   
+   printf("-a\n");
+   printf("\tAPP_NAME: same as -t but with the application name\n");
+
    printf("-ft: fake threads (put threads that spinloop with low priority on all cores)\n\n");
 
    printf("--exclude-kernel\n--exclude-user\n\tglobal switches (override per event switches)\n");
+
+   printf("--use-msr\n\tForce using msr directly instead of the perf API (AMD 10h and 15h only)\n");
 }
 
 void parse_options(int argc, char **argv) {
@@ -291,11 +326,6 @@ void parse_options(int argc, char **argv) {
          events[nb_events].exclude_user = atoi(argv[i + 4]);
          events[nb_events].per_node = (atoi(argv[i + 5]) == 1);
          events[nb_events].cpu_filter = (*argv[i + 5] == '-')?-(atoi(argv[i + 5])):-1;
-
-         struct msr *msr = get_msr(events[nb_events].config, events[nb_events].cpu_filter);
-         events[nb_events].msr_select = msr->select;
-         events[nb_events].msr_value = msr->value;
-         reserve_msr(msr->id, events[nb_events].config, events[nb_events].cpu_filter);
 
          nb_events++;
 
@@ -336,6 +366,20 @@ void parse_options(int argc, char **argv) {
 
          i += 4;
       }
+
+      else if (!strcmp(argv[i], "-t")) {
+         if (i + 1 >= argc)
+            die("Missing argument for -t TID\n");
+         add_tid(atoi(argv[i + 1]));
+         printf("#Matching pid: %d (user_provided)\n", atoi(argv[i + 1]));
+         i += 2;
+      }
+      else if (!strcmp(argv[i], "-a")) {
+         if (i + 1 >= argc)
+            die("Missing argument for -a APPLICATION\n");
+         get_tids_of_app(argv[i + 1]);
+         i += 2;
+      }
       else if (!strcmp(argv[i], "-ft")) {
          with_fake_threads = 1;
          /* see spin_loop for details */
@@ -350,6 +394,10 @@ void parse_options(int argc, char **argv) {
       else if (!strcmp(argv[i], "--exclude-kernel")) {
          global_exclude_kernel = 1;
          printf("#WARNING: global exclude kernel set\n");
+         i++;
+      }
+      else if (!strcmp(argv[i], "--use-msr")) {
+         global_use_msr = 1;
          i++;
       }
       else if (!strcmp(argv[i], "-h")) {
@@ -387,8 +435,21 @@ int main(int argc, char**argv) {
       die("No events defined");
    }
 
+   for(i = 0; global_use_msr && i < nb_events; i++) {
+      if(events[i].type == PERF_TYPE_RAW) {
+         struct msr *msr = get_msr(events[i].config, events[i].cpu_filter);
+         events[i].msr_select = msr->select;
+         events[i].msr_value = msr->value;
+         reserve_msr(msr->id, events[i].config, events[i].cpu_filter);
+
+         if(nb_observed_pids > 0) {
+            die("Cannot filter by application name/pid and use MSR at the same time");
+         }
+      }
+   }
+
    /* Load the kernel module for MSR access */
-   if(system("sudo modprobe msr")) {};
+   if(global_use_msr && system("sudo modprobe msr")) {};
 
 
    printf("#NB cpus :\t%d\n", ncpus);
@@ -434,18 +495,23 @@ int main(int argc, char**argv) {
 
       char core_str[3];
       snprintf(core_str,sizeof(core_str), "%d", events[i].cpu_filter);
-      printf("#Event %d: %s (%llx) (Exclude Kernel: %s, Exclude User: %s, Per node: %s, Configured core(s): %s)\n", 
+      printf("#Event %d: %s (%llx) (Exclude Kernel: %s, Exclude User: %s, Per node: %s, Configured core(s): %s, use msr = %s)\n", 
             i, 
             events[i].name, 
             (long long unsigned) events[i].config, 
             (events[i].exclude_kernel) ? "yes" : "no", 
             (events[i].exclude_user) ? "yes" : "no", 
             (events[i].per_node) ? "yes" : "no", 
-            events[i].cpu_filter == -1 ? "all" : core_str);
+            events[i].cpu_filter == -1 ? "all" : core_str,
+            events[i].type == PERF_TYPE_RAW && global_use_msr ? "yes" : "no"
+      );
    }
 
-   int nb_threads = ncpus;
-   printf("#Event\tCore\tTime\t\t\tSamples\t%% time enabled\tlogical time\n");
+   int nb_threads = nb_observed_pids ? nb_observed_pids : ncpus;
+   if (nb_observed_pids)
+      printf("#Event\tTID\tTime\t\t\tSamples\t%% time enabled\tlogical time\n");
+   else
+      printf("#Event\tCore\tTime\t\t\tSamples\t%% time enabled\tlogical time\n");
 
    /* 
     * Spawn 1 monitoring thread on each monitored core
@@ -454,7 +520,10 @@ int main(int argc, char**argv) {
    pthread_t threads[nb_threads];
    for (i = 0; i < nb_threads; i++) {
       pdata_t *data = calloc(1, sizeof(*data));
-      data->core = i;
+      if (nb_observed_pids > 0)
+         data->tid = observed_pids[i];
+      else
+         data->core = i;
 
       if(with_fake_threads) {
          pthread_create(&threads[i], NULL, spin_loop, data);
@@ -580,6 +649,11 @@ static uint64_t rdmsr(int cpu, uint32_t msr) {
 
 void stop_all_pmu() {
    int cpu, msr;
+
+   if(!global_use_msr) {
+      return;
+   }
+
    for(cpu = 0; cpu < ncpus; cpu++) {
       for(msr = 0; msr < nb_events; msr++) {
          if(events[msr].type == PERF_TYPE_RAW) {
