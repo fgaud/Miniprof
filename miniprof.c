@@ -133,7 +133,7 @@ void set_affinity(int tid, int core_id) {
  * This is used to make sure that a core is never halted,
  * in order to avoid bugs/inconsistencies with the performance counters.
  */
-__attribute__((optimize("O0"))) static void* spin_loop(void *pdata) {
+void* spin_loop(void *pdata) {
    pdata_t *data = (pdata_t*) pdata;
 
    pid_t tid = gettid();
@@ -142,7 +142,7 @@ __attribute__((optimize("O0"))) static void* spin_loop(void *pdata) {
       perror("Error while setting priority");
    }
 
-   while(1);
+   while(1) { data->core++; };
    return NULL;
 }
 

@@ -1,10 +1,14 @@
 CFLAGS   = -Wall -O2 -g -Werror
 LDLIBS   = -lpthread -lnuma
-FILES    = miniprof.c machine.c miniprof.h
 
-all: miniprof
+all: makefile.dep miniprof
 
-miniprof: ${FILES}
+makefile.dep: *.[Cch]
+	(for i in *.[Cc]; do ${CC} -MM "$${i}" ${CFLAGS}; done) > $@
+   
+-include makefile.dep
+
+miniprof: machine.o
 
 tags: ${FILES}
 	ctags --totals `find . -name '*.[ch]'`
